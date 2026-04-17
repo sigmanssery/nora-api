@@ -9,173 +9,100 @@ import json
 import re
 import os
 
-import firebase_admin
-from firebase_admin import credentials, firestore as fb_firestore
-
-# ── Firebase 初始化 ──
-_fb_app = None
-_fb_db = None
-
-def get_firebase():
-    global _fb_app, _fb_db
-    if _fb_db is not None:
-        return _fb_db
-    try:
-        cred_json = os.environ.get("FIREBASE_CREDENTIALS")
-        if cred_json:
-            import json as _json
-            cred_dict = _json.loads(cred_json)
-            cred = credentials.Certificate(cred_dict)
-            if not firebase_admin._apps:
-                _fb_app = firebase_admin.initialize_app(cred)
-            _fb_db = fb_firestore.client()
-    except Exception as e:
-        print(f"Firebase init error: {e}")
-    return _fb_db
-
-# ── 記憶系統 ──
-async def save_memory(user_id: str, user_msg: str, nora_reply: str, stats: dict):
-    """儲存對話摘要到 Firebase"""
-    db = get_firebase()
-    if not db:
-        return
-    try:
-        # 用便宜的 AI 生成摘要（或直接截斷存）
-        summary = f"用戶：{user_msg[:100]}\nNora：{nora_reply[:200]}"
-        doc = {
-            "timestamp": fb_firestore.SERVER_TIMESTAMP,
-            "summary": summary,
-            "stats_snapshot": stats,
-            "user_msg_preview": user_msg[:50]
-        }
-        db.collection("memories").document(user_id).collection("turns").add(doc)
-    except Exception as e:
-        print(f"Firebase save error: {e}")
-
-def get_memories(user_id: str, limit: int = 8) -> str:
-    """從 Firebase 取出最近的對話摘要"""
-    db = get_firebase()
-    if not db:
-        return ""
-    try:
-        docs = (db.collection("memories").document(user_id)
-                .collection("turns")
-                .order_by("timestamp", direction=fb_firestore.Query.DESCENDING)
-                .limit(limit)
-                .stream())
-        memories = []
-        for doc in docs:
-            d = doc.to_dict()
-            if d.get("summary"):
-                memories.append(d["summary"])
-        if not memories:
-            return ""
-        memories.reverse()
-        return "\n---\n".join(memories)
-    except Exception as e:
-        print(f"Firebase get error: {e}")
-        return ""
-
-
-import firebase_admin
-from firebase_admin import credentials, firestore as fs
-
-# ── Firebase 初始化 ──
-_fb_app = None
-_fb_db = None
-
-def get_firebase():
-    global _fb_app, _fb_db
-    if _fb_db is not None:
-        return _fb_db
-    try:
-        cred_json = os.environ.get("FIREBASE_CREDENTIALS")
-        if cred_json:
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                f.write(cred_json)
-                tmp_path = f.name
-            cred = credentials.Certificate(tmp_path)
-            if not firebase_admin._apps:
-                _fb_app = firebase_admin.initialize_app(cred)
-            _fb_db = fs.client()
-            return _fb_db
-    except Exception as e:
-        print(f"Firebase init error: {e}")
-    return None
-
-async def save_memory(user_id: str, summary: str, turn: int):
-    """儲存對話摘要到 Firebase"""
-    db = get_firebase()
-    if not db:
-        return
-    try:
-        doc_ref = db.collection("memories").document(user_id).collection("turns").document(str(turn))
-        doc_ref.set({
-            "summary": summary,
-            "timestamp": fs.SERVER_TIMESTAMP,
-            "turn": turn
-        })
-    except Exception as e:
-        print(f"Firebase save error: {e}")
-
-def get_memories(user_id: str, limit: int = 10) -> list:
-    """從 Firebase 取得最近的對話摘要"""
-    db = get_firebase()
-    if not db:
-        return []
-    try:
-        docs = (db.collection("memories")
-                  .document(user_id)
-                  .collection("turns")
-                  .order_by("turn", direction=fs.Query.DESCENDING)
-                  .limit(limit)
-                  .stream())
-        memories = []
-        for doc in docs:
-            data = doc.to_dict()
-            memories.append(data.get("summary", ""))
-        memories.reverse()
-        return memories
-    except Exception as e:
-        print(f"Firebase get error: {e}")
-        return []
-
-def get_turn_count(user_id: str) -> int:
-    """取得對話輪數"""
-    db = get_firebase()
-    if not db:
-        return 0
-    try:
-        doc_ref = db.collection("memories").document(user_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            return doc.to_dict().get("turn_count", 0)
-        return 0
-    except:
-        return 0
-
-def increment_turn(user_id: str) -> int:
-    """增加對話輪數並回傳新值"""
-    db = get_firebase()
-    if not db:
-        return 0
-    try:
-        doc_ref = db.collection("memories").document(user_id)
-        doc = doc_ref.get()
-        current = doc.to_dict().get("turn_count", 0) if doc.exists else 0
-        new_turn = current + 1
-        doc_ref.set({"turn_count": new_turn}, merge=True)
-        return new_turn
-    except:
-        return 0
-
-
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DB_PATH = "nora.db"
 
+# ── Turso 記憶系統 ──
+TURSO_URL = os.environ.get("TURSO_URL", "")
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
+
+async def turso_execute(sql: str, params: list = []):
+    """執行 Turso SQL"""
+    if not TURSO_URL or not TURSO_TOKEN:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{TURSO_URL}/v2/pipeline",
+                headers={
+                    "Authorization": f"Bearer {TURSO_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "requests": [
+                        {
+                            "type": "execute",
+                            "stmt": {
+                                "sql": sql,
+                                "args": [{"type": "text", "value": str(p)} for p in params]
+                            }
+                        },
+                        {"type": "close"}
+                    ]
+                }
+            )
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"Turso error: {e}")
+    return None
+
+async def init_turso():
+    """建立 Turso 記憶表"""
+    await turso_execute("""
+        CREATE TABLE IF NOT EXISTS memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            turn INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    await turso_execute("""
+        CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id, turn)
+    """)
+
+async def save_memory_turso(user_id: str, summary: str):
+    """儲存對話摘要到 Turso"""
+    try:
+        # 取得當前輪數
+        result = await turso_execute(
+            "SELECT COUNT(*) as cnt FROM memories WHERE user_id = ?",
+            [user_id]
+        )
+        turn = 0
+        if result:
+            rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+            if rows:
+                turn = int(rows[0][0].get("value", 0))
+
+        await turso_execute(
+            "INSERT INTO memories (user_id, summary, turn) VALUES (?, ?, ?)",
+            [user_id, summary, turn + 1]
+        )
+    except Exception as e:
+        print(f"Save memory error: {e}")
+
+async def get_memories_turso(user_id: str, limit: int = 8) -> list:
+    """從 Turso 取得最近的記憶"""
+    try:
+        result = await turso_execute(
+            "SELECT summary FROM memories WHERE user_id = ? ORDER BY turn DESC LIMIT ?",
+            [user_id, limit]
+        )
+        if not result:
+            return []
+        rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+        memories = [row[0].get("value", "") for row in rows if row]
+        memories.reverse()
+        return memories
+    except Exception as e:
+        print(f"Get memories error: {e}")
+        return []
+
+# ── SQLite 本地資料庫 ──
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -204,7 +131,7 @@ def init_db():
 
 init_db()
 
-# ── HTML 模板（Railway 存，AI 不用輸出）──
+# ── HTML 模板 ──
 NORA_TEMPLATE = """<style>@keyframes nora-pulse{{0%,100%{{opacity:0.1;transform:scale(0.8);}}50%{{opacity:1;transform:scale(1.2);}}}}</style>
 <text-reply>
 <div style="background-color:#120e11;width:100%;display:flex;flex-direction:column;align-items:center;font-family:Georgia,serif;padding-bottom:32px;position:relative;overflow:hidden;">
@@ -309,7 +236,7 @@ def update_stats_from_dict(user_id, stats):
             val = max(0, min(max_val, int(stats[field])))
             fields.append(f"{field} = ?")
             values.append(val)
-    if stats.get("negative", 0) >= 100:
+    if int(stats.get("negative", 0)) >= 100:
         fields.append("broken = ?")
         values.append(1)
     if fields:
@@ -333,7 +260,6 @@ def get_tw_time(now_str):
         return "--:--", "未知", 0
 
 def extract_stats_and_content(content, user_id):
-    """提取 NORA_STATS 更新資料庫並移除"""
     pattern = r'<!--NORA_STATS:(.*?)-->'
     match = re.search(pattern, content, re.DOTALL)
     if match:
@@ -346,14 +272,9 @@ def extract_stats_and_content(content, user_id):
     return content
 
 def parse_and_render(content, data, user_id):
-    """解析 AI 回傳的 JSON，填入模板"""
     tw_time, period, _ = get_tw_time(data["now"])
     absence_display = data["absence"]["display"]
-
-    # 先提取數值並更新資料庫
     content = extract_stats_and_content(content, user_id)
-
-    # 嘗試解析 JSON 格式
     json_pattern = r'<!--NORA_CONTENT:(.*?)-->'
     match = re.search(json_pattern, content, re.DOTALL)
     if match:
@@ -369,15 +290,11 @@ def parse_and_render(content, data, user_id):
             )
         except:
             pass
-
-    # 如果已經是 text-reply 格式
     if "<text-reply>" in content:
         return content
-
-    # 純文字兜底
     return render_template(tw_time, period, "臥室", absence_display, "", f"<p>{content}</p>", "")
 
-def build_system_prompt(data, memories=""):
+def build_system_prompt(data, memories=None):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -409,7 +326,7 @@ def build_system_prompt(data, memories=""):
     elif loneliness >= 75:
         loneliness_desc = "非常孤獨：眼眶紅，衝過來死死抱住用戶，把臉埋進胸口，手抓衣服不放，深吸用戶氣味，「你不要走好不好」"
     elif loneliness >= 60:
-        loneliness_desc = "孤獨：輕輕拉住袖子不放，找藉口讓用戶留下，把臉埋進肩膀閉眼深呼吸"
+        loneliness_desc = "孤獨：輕輕拉住袖子不放，找藉口讓用戶留下，靠得很近閉眼深呼吸"
     elif loneliness >= 40:
         loneliness_desc = "有點孤獨，說話帶依賴，偶爾找藉口靠近"
     else:
@@ -429,11 +346,10 @@ def build_system_prompt(data, memories=""):
     elif affection >= 50: affection_desc = "中等好感，開始信任"
     else: affection_desc = "低好感，保持距離"
 
-    # 取得記憶
-    memories = get_memories(user_id) if user_id != "default_nora" else []
+    # 記憶注入
     memory_text = ""
     if memories:
-        memory_text = "\n\n【過去的記憶（最近幾輪對話摘要）】\n"
+        memory_text = "\n【過去的記憶】\n"
         for i, m in enumerate(memories[-5:], 1):
             memory_text += f"{i}. {m}\n"
 
@@ -449,6 +365,11 @@ Loneliness≥75：忍不住，直接衝過去死死抱住。
 傷心時直接說「安慰我」，不嚎啕，但眼淚會流。
 自稱「人家」。
 
+【房間】
+臥室、客廳、餐廳、書房、陽台、廚房、浴室。
+茶几上永遠有杯沒喝完的奶茶。冰箱上有手寫便條。
+書房有本說不清內容的書。梳妝台有個空相框。
+{memory_text}
 【當前狀態】
 時間：{tw_time} 台北（{period}）
 離上次互動：{absence["display"]} Tier {absence["tier"]}：{tier_desc.get(absence["tier"], "")}
@@ -460,9 +381,6 @@ Hunger={s["hunger"]} Energy={s["energy"]} Desire={s["desire"]} Mystery={s["myste
 
 行為必須完全符合數值描述，不得自行降低強度。
 
-【過去的記憶】
-{memories}
-
 【數值規則】
 Mood：友善+5~15，冷漠-5~10
 Loneliness：每輪+2，互動好-5~15
@@ -470,16 +388,16 @@ Affection：上限200，真誠+1~5
 Negative：傷害+10~25，安慰-5~15；=100且未安慰→BROKEN
 Hunger：每輪+1；Energy：每輪-1
 
-【輸出格式（只輸出這個，不要輸出其他任何東西）】
-<!--NORA_CONTENT:{{"location":"房間名稱","scene":"50字以內場景氛圍","story":"故事內容，<p>段落，*動作*，「對話」，<em style=color:#e8a4bc;>強調</em>","thought":"20~60字內心想法"}}-->
+【輸出格式（只輸出這個）】
+<!--NORA_CONTENT:{{"location":"房間名稱","scene":"50字以內場景氛圍","story":"故事內容，<p>段落，*動作*，「對話」","thought":"20~60字內心想法"}}-->
 <!--NORA_STATS:{{"mood":數值,"loneliness":數值,"affection":數值,"negative":數值,"hunger":數值,"energy":數值,"desire":數值,"mystery":數值}}-->
 
-兩行都必須輸出，數值必須是整數，不要輸出任何其他內容。"""
+兩行都必須輸出，數值必須是整數。"""
 
 # ── 原有端點 ──
 @app.get("/")
 def root():
-    return {"status": "Nora API running", "version": "4.0"}
+    return {"status": "Nora API running", "version": "4.1"}
 
 @app.get("/status/{user_id}")
 def get_status(user_id: str):
@@ -598,7 +516,9 @@ async def openai_chat(request: Request):
 
     data = get_user_data(user_id)
     update_last_seen(user_id)
-    memories = get_memories(user_id)
+
+    # 取得記憶
+    memories = await get_memories_turso(user_id)
     system_prompt = build_system_prompt(data, memories)
     user_messages = [m for m in messages if m["role"] != "system"]
 
@@ -610,29 +530,19 @@ async def openai_chat(request: Request):
     else:
         content, usage = await call_deepseek(api_key, model, system_prompt, user_messages, max_tokens)
 
-    # 解析 JSON 內容，填入模板，更新數值
     final_content = parse_and_render(content, data, user_id)
 
-    # 儲存記憶到 Firebase（背景執行）
-    user_msg = user_messages[-1]["content"] if user_messages else ""
-    import asyncio
-    asyncio.create_task(save_memory(user_id, user_msg, content[:300], data["stats"]))
-
-    # 生成並儲存對話摘要
+    # 儲存記憶摘要
     try:
         user_msg = ""
         for m in user_messages:
             if m["role"] == "user":
-                user_msg = m["content"][-100:] if len(m["content"]) > 100 else m["content"]
-        
-        # 簡單摘要：用戶說了什麼 + Nora 的情緒狀態
+                user_msg = m["content"][-150:] if len(m["content"]) > 150 else m["content"]
         s = data["stats"]
-        summary = f"用戶：{user_msg} | Nora狀態：Mood={s['mood']} Loneliness={s['loneliness']} Affection={s['affection']}"
-        turn = increment_turn(user_id)
-        import asyncio
-        asyncio.create_task(save_memory(user_id, summary, turn))
+        summary = f"用戶：{user_msg} | Nora：Mood={s['mood']} Loneliness={s['loneliness']} Affection={s['affection']}"
+        await save_memory_turso(user_id, summary)
     except Exception as e:
-        print(f"Memory save error: {e}")
+        print(f"Memory error: {e}")
 
     return {
         "id": "chatcmpl-nora",
