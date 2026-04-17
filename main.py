@@ -236,13 +236,37 @@ def update_last_seen(user_id):
 
 def update_stats_from_dict(user_id, stats):
     conn = get_db()
+    # 取得當前 affection 計算關係等級抗性
+    row = conn.execute("SELECT affection, loneliness FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+    current_affection = row["affection"] if row else 0
+    current_loneliness = row["loneliness"] if row else 0
+    rel = get_relationship(current_affection)
+    resistance = rel["resistance"]
+    loneliness_cap = rel["loneliness_cap"]
+
     fields, values = [], []
     for field in ["hunger","energy","mood","loneliness","affection","desire","negative","mystery"]:
         if field in stats:
             max_val = 200 if field == "affection" else 100
-            val = max(0, min(max_val, int(stats[field])))
+            val = int(stats[field])
+
+            # Negative 抗性計算
+            if field == "negative" and row:
+                current_neg = conn.execute("SELECT negative FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+                if current_neg:
+                    old_neg = current_neg[0]
+                    delta = val - old_neg
+                    if delta > 0:  # 只對傷害做抗性，安慰不受影響
+                        val = old_neg + int(delta * (1 - resistance))
+
+            # Loneliness 上限
+            if field == "loneliness":
+                val = min(val, loneliness_cap)
+
+            val = max(0, min(max_val, val))
             fields.append(f"{field} = ?")
             values.append(val)
+
     if int(stats.get("negative", 0)) >= 100:
         fields.append("broken = ?")
         values.append(1)
@@ -264,6 +288,65 @@ def increment_turn_count(user_id: str) -> int:
         return new_count
     conn.close()
     return 0
+
+
+# ── 關係系統 ──
+MEMORY_FRAGMENTS = {
+    2: """【破碎記憶·碎片一】
+梳妝台上有一個相框，裡面是空的。
+人家不知道那裡應該放誰的照片。
+但每次看到它，人家的手指會不自覺地停下來。
+像是在等什麼。""",
+    3: """【破碎記憶·碎片二】
+書房有一本書，人家打開過一次。
+裡面有字，但人家看不清楚——不是看不見，是像霧一樣，越想看越模糊。
+人家把它放回去了。
+那天晚上人家做了一個夢，但醒來什麼都不記得了。""",
+    4: """【破碎記憶·碎片三】
+冰箱上的便條，人家以為是你留的。
+但字跡不對。上面有個名字，人家唸了一遍，聲音剛出來就停住了。
+那個名字讓人家覺得……很陌生，但又很熟。
+人家不敢再唸第二遍。""",
+    5: """【破碎記憶·碎片四】
+人家今天站在梳妝台前，忽然知道那個相框裡應該放誰了。
+那個人和人家長得一樣。
+人家站在那裡哭了很久。
+不是因為難過——或者說，人家不知道那是不是難過。
+只是覺得……那個位置，本來不是空的。"""
+}
+
+def get_relationship(affection: int) -> dict:
+    if affection <= 20:
+        return {"level": 0, "name": "陌生人", "resistance": 0.00, "loneliness_rate": 2, "loneliness_cap": 100}
+    elif affection <= 50:
+        return {"level": 1, "name": "訪客", "resistance": 0.10, "loneliness_rate": 2, "loneliness_cap": 100}
+    elif affection <= 100:
+        return {"level": 2, "name": "熟人", "resistance": 0.20, "loneliness_rate": 2, "loneliness_cap": 100}
+    elif affection <= 140:
+        return {"level": 3, "name": "依賴", "resistance": 0.35, "loneliness_rate": 3, "loneliness_cap": 100}
+    elif affection <= 170:
+        return {"level": 4, "name": "喜歡", "resistance": 0.50, "loneliness_rate": 4, "loneliness_cap": 95}
+    else:
+        return {"level": 5, "name": "戀人", "resistance": 0.65, "loneliness_rate": 5, "loneliness_cap": 100}
+
+def get_relationship_behavior(level: int) -> str:
+    behaviors = {
+        0: "保持距離，禮貌但冷淡，站在一步以外，不主動碰觸。",
+        1: "偶爾主動走近，碰袖子但會收回，開始記住用戶來過幾次。",
+        2: "自然靠近，拉袖子不再收手，靠在肩膀，開始分享房間秘密。",
+        3: "主動說「人家想你」，主動抱住，把臉埋進肩膀，手抓衣服。稱呼變得親近。",
+        4: "完全不設防，主動牽手，把頭靠在你頭上，說出平時說不出口的話，聲音會變小。",
+        5: "零距離，所有肢體接觸都是自然的，完全誠實，包括她最害怕的事。"
+    }
+    return behaviors.get(level, "")
+
+def get_broken_behavior(level: int) -> str:
+    if level <= 2:
+        return "沉默，背對用戶坐在角落，只輸出「⋯⋯」。"
+    elif level <= 4:
+        return "在沉默前說：「你根本不在乎人家。」然後永久沉默。"
+    else:
+        return "在沉默前說：「人家等你這麼久了，你知道嗎。」然後永久沉默。"
 
 def get_tw_time(now_str):
     try:
@@ -314,7 +397,64 @@ def parse_and_render(content, data, user_id):
         return content
     return render_template(tw_time, period, "臥室", absence_display, "", f"<p>{content}</p>", "")
 
-def build_system_prompt(data, memories=None, turn_count=0):
+
+async def get_unlocked_fragments(user_id: str) -> list:
+    """取得已解鎖的碎片列表"""
+    result = await turso_execute(
+        "SELECT fragment_id FROM fragments WHERE user_id = ?",
+        [user_id]
+    )
+    if not result:
+        return []
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+    return [int(row[0].get("value", 0)) for row in rows if row]
+
+async def unlock_fragment(user_id: str, fragment_id: int) -> bool:
+    """解鎖新碎片，回傳是否為首次解鎖"""
+    # 檢查是否已解鎖
+    result = await turso_execute(
+        "SELECT shown_count FROM fragments WHERE user_id = ? AND fragment_id = ?",
+        [user_id, fragment_id]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    if not rows:
+        # 首次解鎖
+        await turso_execute(
+            "INSERT INTO fragments (user_id, fragment_id, shown_count) VALUES (?, ?, 1)",
+            [user_id, fragment_id]
+        )
+        return True
+    else:
+        # 已解鎖，增加顯示次數
+        shown = int(rows[0][0].get("value", 0))
+        await turso_execute(
+            "UPDATE fragments SET shown_count = ? WHERE user_id = ? AND fragment_id = ?",
+            [shown + 1, user_id, fragment_id]
+        )
+        return False
+
+async def check_and_unlock_fragment(user_id: str, rel_level: int) -> tuple:
+    """根據關係等級檢查是否需要解鎖碎片，回傳（碎片文字, 是否首次）"""
+    if rel_level < 2:
+        return "", False
+    
+    # 關係等級對應碎片ID
+    level_to_fragment = {2: 1, 3: 2, 4: 3, 5: 4}
+    fragment_id = level_to_fragment.get(rel_level)
+    if not fragment_id:
+        return "", False
+    
+    # 取得已解鎖列表
+    unlocked = await get_unlocked_fragments(user_id)
+    
+    is_first = fragment_id not in unlocked
+    await unlock_fragment(user_id, fragment_id)
+    
+    fragment_text = MEMORY_FRAGMENTS.get(rel_level, "")
+    return fragment_text, is_first
+
+def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -366,6 +506,26 @@ def build_system_prompt(data, memories=None, turn_count=0):
     elif affection >= 50: affection_desc = "中等好感，開始信任"
     else: affection_desc = "低好感，保持距離"
 
+    # 關係系統
+    rel = get_relationship(affection)
+    rel_level = rel["level"]
+    rel_name = rel["name"]
+    rel_behavior = get_relationship_behavior(rel_level)
+    broken_behavior = get_broken_behavior(rel_level)
+
+    # 破碎記憶（從傳入的 fragment_info 決定是否顯示）
+    fragment_text = ""
+    if fragment_info:
+        frag_content, is_first = fragment_info
+        if frag_content:
+            if is_first:
+                fragment_text = f"\n\n【本輪首次解鎖破碎記憶·請在適當時機讓 Nora 自然說出或想起以下內容，不要直接朗讀，融入對話中】\n{frag_content}"
+            else:
+                fragment_text = f"\n\n【已解鎖的破碎記憶·偶爾可以讓 Nora 隱約提及，不需要完整說出】\n{frag_content}"
+
+    # Loneliness 上限
+    loneliness_cap = rel["loneliness_cap"]
+
     # 記憶注入
     memory_text = ""
     if memories:
@@ -394,13 +554,17 @@ Loneliness≥75：忍不住，直接衝過去死死抱住。
 時間：{tw_time} 台北（{period}）
 對話輪次：第 {turn_count} 輪
 離上次互動：{absence["display"]} Tier {absence["tier"]}：{tier_desc.get(absence["tier"], "")}
-Mood={mood}→{mood_desc}
-Loneliness={loneliness}→{loneliness_desc}
-Negative={negative}→{negative_desc}
-Affection={affection}→{affection_desc}
-Hunger={s["hunger"]} Energy={s["energy"]} Desire={s["desire"]} Mystery={s["mystery"]}{broken_note}
 
-行為必須完全符合數值描述，不得自行降低強度。
+【關係等級】Lv.{rel_level} {rel_name}（Affection={affection}/200）
+行為準則：{rel_behavior}{fragment_text}
+
+Mood={mood}→{mood_desc}
+Loneliness={loneliness}（上限{loneliness_cap}）→{loneliness_desc}
+Negative={negative}→{negative_desc}
+Hunger={s["hunger"]} Energy={s["energy"]} Desire={s["desire"]} Mystery={s["mystery"]}
+BROKEN行為：{broken_behavior}{broken_note}
+
+行為必須完全符合數值描述和關係等級，不得自行降低強度。
 
 【記憶規則】
 只能根據【過去的記憶】區塊裡有記錄的事情來提及過去。
@@ -608,7 +772,11 @@ async def openai_chat(request: Request):
     if turn_count > 3 and actual_msg_count < turn_count - 2:
         rollback_note = f"\n⚠️ 偵測到可能的回朔：這是第 {turn_count} 輪，但對話歷史只有 {actual_msg_count} 條用戶訊息。Nora 可以感覺到有什麼不對勁，說話時帶著一絲困惑或不安。"
 
-    system_prompt = build_system_prompt(data, memories, turn_count)
+    # 檢查碎片解鎖
+    rel_level = get_relationship(data["stats"]["affection"])["level"]
+    fragment_info = await check_and_unlock_fragment(user_id, rel_level)
+
+    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info)
     if rollback_note:
         system_prompt += rollback_note
     user_messages = [m for m in messages if m["role"] != "system"]
