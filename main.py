@@ -16,7 +16,7 @@ DB_PATH = "nora.db"
 
 # ── Turso 記憶系統 ──
 TURSO_URL = os.environ.get("TURSO_URL", "https://nora-storage-sigmanssery.aws-ap-northeast-1.turso.io")
-TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJnaWQiOiIyN2I2ZmZjOC0yYmI2LTQ5MmYtODc3ZS1kNGMzNDAwNjBkOGEiLCJpYXQiOjE3NzY0MjcyMTQsInJpZCI6ImM1NzZiNjhmLWNkMDMtNDM2Mi05YWVjLTcxMWE3ZmJiNjI3ZCJ9.T7qSYoW1BCDtjEwPC8pVBeHRdLOyM02LxvkqEeJ2QrEAI6ZXdQrNyRr2TYXrU7NewZlEIS0HC4lX8jtgkW7WDw")
 
 # Debug 用
 import sys
