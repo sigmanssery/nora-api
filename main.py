@@ -591,33 +591,58 @@ async def openai_chat(request: Request):
 
     # 儲存記憶摘要
     try:
+        import re as _re
+        # 提取用戶說的話
         user_msg = ""
         for m in user_messages:
             if m["role"] == "user":
                 raw = m["content"]
-                import re as _re
-                # 先嘗試提取引號內的對話（Quackai格式："實際對話"）
                 quoted = _re.findall(r'[:\s]["](.*?)["]', raw)
                 if quoted:
-                    user_msg = quoted[0][:100]
+                    user_msg = quoted[0][:80]
                 else:
-                    # 找冒號後的內容
-                    colon_match = _re.search(r'[:：]\s*(.{1,100})', raw)
+                    colon_match = _re.search(r'[:：]\s*(.{1,80})', raw)
                     if colon_match:
-                        user_msg = colon_match.group(1)[:100]
+                        user_msg = colon_match.group(1)[:80]
                     else:
-                        user_msg = raw[:100]
+                        user_msg = raw[:80]
+
+        # 提取 Nora 的行動和內心想法（從 final_content 解析）
+        nora_action = ""
+        nora_thought = ""
+        json_match = _re.search(r'<!--NORA_CONTENT:(.*?)-->', content, _re.DOTALL)
+        if json_match:
+            try:
+                nora_data = json.loads(json_match.group(1))
+                story = nora_data.get("story", "")
+                thought = nora_data.get("thought", "")
+                # 提取story裡的對話（引號內容）
+                dialogs = _re.findall(r'[「](.*?)[」]', story)
+                if dialogs:
+                    nora_action = "說「" + dialogs[0][:40] + "」"
+                else:
+                    # 提取動作（*斜體*內容）
+                    actions = _re.findall(r'\*(.*?)\*', story)
+                    if actions:
+                        nora_action = actions[0][:40]
+                nora_thought = thought[:60] if thought else ""
+            except:
+                pass
 
         s = data["stats"]
-        # 提取 Nora 回覆的關鍵情緒
-        nora_mood = ""
-        if s['loneliness'] >= 75: nora_mood = "非常孤獨"
-        elif s['loneliness'] >= 60: nora_mood = "有點孤獨"
-        elif s['mood'] >= 70: nora_mood = "心情好"
-        elif s['mood'] <= 35: nora_mood = "心情低落"
+        if s["loneliness"] >= 75: nora_mood = "非常孤獨"
+        elif s["loneliness"] >= 60: nora_mood = "有點孤獨"
+        elif s["mood"] >= 70: nora_mood = "心情好"
+        elif s["mood"] <= 35: nora_mood = "心情低落"
         else: nora_mood = "平靜"
 
-        summary = f"用戶說：{user_msg} | Nora狀態：{nora_mood}（Mood={s['mood']} L={s['loneliness']} A={s['affection']}）"
+        tw_time_now, period_now, _ = get_tw_time(data["now"])
+        parts = [f"[{tw_time_now} {period_now}] 用戶：{user_msg}"]
+        if nora_action: parts.append(f"Nora：{nora_action}")
+        if nora_thought: parts.append(f"內心：{nora_thought}")
+        parts.append(f"狀態：{nora_mood}(M={s["mood"]} L={s["loneliness"]} A={s["affection"]})")
+        summary = " | ".join(parts)
+        await save_memory_turso(user_id, summary)
         await save_memory_turso(user_id, summary)
     except Exception as e:
         print(f"Memory error: {e}")
