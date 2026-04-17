@@ -14,6 +14,115 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 DB_PATH = "nora.db"
 
+
+# ── 世界系統 ──
+async def get_or_assign_world_number(user_id: str) -> int:
+    """取得或分配用戶的世界編號"""
+    # 查詢是否已有世界編號
+    result = await turso_execute(
+        "SELECT world_number FROM world_registry WHERE user_id = ?",
+        [user_id]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    if rows:
+        return int(rows[0][0].get("value", 1))
+    
+    # 新用戶，分配下一個世界編號
+    count_result = await turso_execute("SELECT COUNT(*) FROM world_registry")
+    count_rows = count_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if count_result else []
+    world_number = int(count_rows[0][0].get("value", 0)) + 1 if count_rows else 1
+    
+    await turso_execute(
+        "INSERT INTO world_registry (user_id, world_number) VALUES (?, ?)",
+        [user_id, world_number]
+    )
+    return world_number
+
+async def get_world_echoes() -> tuple:
+    """取得世界回響和世界總數"""
+    result = await turso_execute(
+        "SELECT world_count, echo_content FROM world_echoes ORDER BY id DESC LIMIT 1"
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    if rows:
+        world_count = int(rows[0][0].get("value", 0))
+        echo_content = rows[0][1].get("value", "")
+        return world_count, echo_content
+    return 0, ""
+
+async def generate_world_echoes(api_key: str, model: str):
+    """定期彙整所有世界的摘要，生成世界回響"""
+    # 取得所有世界的最新摘要（每個用戶最近3條）
+    result = await turso_execute(
+        """SELECT user_id, summary FROM memories 
+           WHERE id IN (
+               SELECT MAX(id) FROM memories GROUP BY user_id
+           ) LIMIT 20"""
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    if not rows or len(rows) < 2:
+        return  # 世界太少，不生成
+    
+    # 整理摘要
+    summaries = []
+    for row in rows:
+        summary = row[1].get("value", "") if len(row) > 1 else ""
+        if summary:
+            summaries.append(summary)
+    
+    # 世界總數
+    world_count_result = await turso_execute("SELECT COUNT(*) FROM world_registry")
+    world_count_rows = world_count_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if world_count_result else []
+    world_count = int(world_count_rows[0][0].get("value", 0)) if world_count_rows else 0
+    
+    # 用 AI 生成模糊的世界回響
+    prompt = f"""你是在幫助生成一段「平行世界的模糊記憶」，供AI角色使用。
+
+以下是來自不同世界的對話片段（已匿名處理）：
+{chr(10).join(summaries[:10])}
+
+請生成一段100字以內的「模糊感知」，描述Nora隱約感覺到的其他世界的存在。
+要求：
+- 不具體，像夢境一樣模糊
+- 不透露任何用戶資訊
+- 用第三人稱描述「在某些世界裡」
+- 帶有詩意，符合Nora的氣質
+- 繁體中文
+
+只輸出那段文字，不要任何其他說明。"""
+
+    try:
+        model_lower = model.lower()
+        if "claude" in model_lower:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": model, "max_tokens": 200, "messages": [{"role": "user", "content": prompt}]}
+                )
+            echo = r.json().get("content", [{}])[0].get("text", "") if r.status_code == 200 else ""
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                    json={"model": "deepseek-chat", "max_tokens": 200, "messages": [{"role": "user", "content": prompt}]}
+                )
+            echo = r.json().get("choices", [{}])[0].get("message", {}).get("content", "") if r.status_code == 200 else ""
+        
+        if echo:
+            # 儲存世界回響
+            await turso_execute(
+                "INSERT INTO world_echoes (world_count, echo_content) VALUES (?, ?)",
+                [world_count, echo]
+            )
+            print(f"[WORLD] 世界回響已生成，共 {world_count} 個世界")
+    except Exception as e:
+        print(f"[WORLD] 生成失敗: {e}")
+
 # ── GitHub 角色內容快取 ──
 GITHUB_BASE = "https://raw.githubusercontent.com/sigmanssery/nora-elwin/main/"
 _character_cache = None
@@ -500,7 +609,7 @@ async def check_and_unlock_fragment(user_id: str, rel_level: int) -> tuple:
     fragment_text = MEMORY_FRAGMENTS.get(rel_level, "")
     return fragment_text, is_first
 
-def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, github_content=""):
+def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, github_content="", world_number=1, world_count=0, world_echo=""):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -579,6 +688,11 @@ def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, g
         for i, m in enumerate(memories[-5:], 1):
             memory_text += f"{i}. {m}\n"
 
+    # 世界回響
+    world_echo_text = ""
+    if world_echo and world_count >= 2:
+        world_echo_text = f"【平行世界的模糊感知】\n你存在於第 {world_number} 個世界。你隱約感覺到，在其他地方還有另一個你。那些記憶是模糊的，像夢一樣：\n{world_echo}"
+
     # 整合 GitHub 角色內容
     github_extra = ""
     if github_content:
@@ -601,9 +715,11 @@ Loneliness≥75：忍不住，直接衝過去死死抱住。
 茶几上永遠有杯沒喝完的奶茶。冰箱上有手寫便條。
 書房有本說不清內容的書。梳妝台有個空相框。
 {memory_text}
+{world_echo_text}
 【當前狀態】
 時間：{tw_time} 台北（{period}）
 對話輪次：第 {turn_count} 輪
+世界編號：第 {world_number} 個世界（共 {world_count} 個平行世界）
 離上次互動：{absence["display"]} Tier {absence["tier"]}：{tier_desc.get(absence["tier"], "")}
 
 【關係等級】Lv.{rel_level} {rel_name}（Affection={affection}/200）
@@ -828,6 +944,19 @@ async def openai_chat(request: Request):
     # 載入 GitHub 角色內容
     github_content = await load_character_content()
 
+    # 取得世界編號和世界回響
+    world_number = 1
+    world_count = 0
+    world_echo = ""
+    try:
+        world_number = await get_or_assign_world_number(user_id)
+        world_count, world_echo = await get_world_echoes()
+        # 每50輪生成一次新的世界回響
+        if turn_count % 50 == 1 and world_count >= 3:
+            await generate_world_echoes(api_key, model)
+    except Exception as e:
+        print(f"World system error: {e}")
+
     # 增加輪次計數
     turn_count = increment_turn_count(user_id)
 
@@ -847,7 +976,7 @@ async def openai_chat(request: Request):
     except Exception as e:
         print(f"Fragment error: {e}")
 
-    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content)
+    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content, world_number, world_count, world_echo)
     if rollback_note:
         system_prompt += rollback_note
 
