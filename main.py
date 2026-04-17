@@ -408,28 +408,47 @@ def root():
 @app.get("/test-turso")
 async def test_turso():
     """測試 Turso 連線"""
-    url = os.environ.get("TURSO_URL", "未設定")
-    token_set = bool(os.environ.get("TURSO_TOKEN", ""))
+    # 直接用當前的全域變數
+    url_set = bool(TURSO_URL)
+    token_set = bool(TURSO_TOKEN)
+    url_preview = TURSO_URL[:50] if TURSO_URL else "空"
     
     # 嘗試寫入
-    result = await turso_execute(
-        "INSERT INTO memories (user_id, summary, turn) VALUES (?, ?, ?)",
-        ["railway_test", "Railway連線測試", 999]
-    )
+    write_ok = False
+    write_err = ""
+    try:
+        result = await turso_execute(
+            "INSERT INTO memories (user_id, summary, turn) VALUES (?, ?, ?)",
+            ["railway_test", "Railway連線測試", 999]
+        )
+        write_ok = result is not None
+        if not write_ok:
+            write_err = "result is None"
+    except Exception as e:
+        write_err = str(e)
     
     # 嘗試讀取
-    read_result = await turso_execute("SELECT COUNT(*) as cnt FROM memories")
     count = 0
-    if read_result:
-        rows = read_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
-        if rows:
-            count = rows[0][0].get("value", 0)
+    read_err = ""
+    try:
+        read_result = await turso_execute("SELECT COUNT(*) as cnt FROM memories")
+        if read_result:
+            rows = read_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+            if rows:
+                count = rows[0][0].get("value", 0)
+        else:
+            read_err = "read_result is None"
+    except Exception as e:
+        read_err = str(e)
     
     return {
-        "turso_url": url,
+        "turso_url_set": url_set,
+        "turso_url_preview": url_preview,
         "token_set": token_set,
-        "write_result": result,
-        "row_count": count
+        "write_ok": write_ok,
+        "write_err": write_err,
+        "row_count": count,
+        "read_err": read_err
     }
 
 @app.get("/status/{user_id}")
