@@ -595,20 +595,18 @@ async def openai_chat(request: Request):
         for m in user_messages:
             if m["role"] == "user":
                 raw = m["content"]
-                # 清理 Quackai 的格式標籤
                 import re as _re
-                # 提取引號內的實際對話
-                quoted = _re.findall(r"[\u300c\u300d\u201c\u201d]([^\u300c\u300d\u201c\u201d]{1,100})[\u300c\u300d\u201c\u201d]", raw)
+                # 先嘗試提取引號內的對話（Quackai格式："實際對話"）
+                quoted = _re.findall(r'[:\s]["](.*?)["]', raw)
                 if quoted:
-                    user_msg = "、".join(quoted[:3])
+                    user_msg = quoted[0][:100]
                 else:
-                    # 移除常見的格式標籤
-                    cleaned = _re.sub(r'USER扮演\S+\s*的行动[:：]', '', raw)
-                    cleaned = _re.sub("USER[^:]*[:]", "", raw)
-                    cleaned = _re.sub("USER[^\n]*", "", cleaned)
-                    cleaned = _re.sub("[^\n]*指导[^\n]*", "", cleaned)
-                    cleaned = " ".join(cleaned.split()).strip()
-                    user_msg = cleaned[:100] if len(cleaned) > 100 else cleaned
+                    # 找冒號後的內容
+                    colon_match = _re.search(r'[:：]\s*(.{1,100})', raw)
+                    if colon_match:
+                        user_msg = colon_match.group(1)[:100]
+                    else:
+                        user_msg = raw[:100]
 
         s = data["stats"]
         # 提取 Nora 回覆的關鍵情緒
