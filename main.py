@@ -18,6 +18,12 @@ DB_PATH = "nora.db"
 TURSO_URL = os.environ.get("TURSO_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 
+# Debug 用
+import sys
+print(f"[STARTUP] TURSO_URL={TURSO_URL[:30] if TURSO_URL else '未設定'}", file=sys.stderr)
+print(f"[STARTUP] TURSO_TOKEN={'已設定' if TURSO_TOKEN else '未設定'}", file=sys.stderr)
+print(f"[STARTUP] ALL_ENV_KEYS={[k for k in os.environ.keys() if 'TURSO' in k]}", file=sys.stderr)
+
 async def turso_execute(sql: str, params: list = []):
     """執行 Turso SQL"""
     if not TURSO_URL or not TURSO_TOKEN:
