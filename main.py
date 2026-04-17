@@ -773,8 +773,12 @@ async def openai_chat(request: Request):
         rollback_note = f"\n⚠️ 偵測到可能的回朔：這是第 {turn_count} 輪，但對話歷史只有 {actual_msg_count} 條用戶訊息。Nora 可以感覺到有什麼不對勁，說話時帶著一絲困惑或不安。"
 
     # 檢查碎片解鎖
-    rel_level = get_relationship(data["stats"]["affection"])["level"]
-    fragment_info = await check_and_unlock_fragment(user_id, rel_level)
+    fragment_info = ("", False)
+    try:
+        rel_level = get_relationship(data["stats"]["affection"])["level"]
+        fragment_info = await check_and_unlock_fragment(user_id, rel_level)
+    except Exception as e:
+        print(f"Fragment error: {e}")
 
     system_prompt = build_system_prompt(data, memories, turn_count, fragment_info)
     if rollback_note:
