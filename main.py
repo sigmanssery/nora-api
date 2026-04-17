@@ -15,7 +15,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 DB_PATH = "nora.db"
 
 # ── Turso 記憶系統 ──
-TURSO_URL = os.environ.get("TURSO_URL", "")
+TURSO_URL = os.environ.get("TURSO_URL", "https://nora-storage-sigmanssery.aws-ap-northeast-1.turso.io")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 
 # Debug 用
