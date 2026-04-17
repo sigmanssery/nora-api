@@ -409,9 +409,13 @@ def root():
 async def test_turso():
     """測試 Turso 連線"""
     # 直接用當前的全域變數
+    import sys
+    print(f"TEST_TURSO: TURSO_URL={TURSO_URL[:30]}", file=sys.stderr)
+    print(f"TEST_TURSO: TURSO_TOKEN_LEN={len(TURSO_TOKEN)}", file=sys.stderr)
     url_set = bool(TURSO_URL)
     token_set = bool(TURSO_TOKEN)
     url_preview = TURSO_URL[:50] if TURSO_URL else "空"
+    token_len = len(TURSO_TOKEN)
     
     # 嘗試寫入
     write_ok = False
@@ -448,7 +452,8 @@ async def test_turso():
         "write_ok": write_ok,
         "write_err": write_err,
         "row_count": count,
-        "read_err": read_err
+        "read_err": read_err,
+        "token_len": token_len
     }
 
 @app.get("/status/{user_id}")
