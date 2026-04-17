@@ -1,12 +1,10 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List
 import sqlite3
 import httpx
-import json
 import os
 
 app = FastAPI()
@@ -48,7 +46,6 @@ def init_db():
 
 init_db()
 
-# ── 工具函數 ──
 def calc_absence(last_seen_str):
     if not last_seen_str:
         return {"duration_min": 0, "display": "初次到訪", "tier": 0}
@@ -110,15 +107,13 @@ def build_injection(data: dict) -> str:
         dt = datetime.fromisoformat(now)
         hour = (dt.hour + 8) % 24
         tw_time = f"{hour:02d}:{dt.minute:02d}"
-        periods = [(6,"深夜"),(12,"早晨"),(14,"午後"),(18,"下午"),(22,"晚上")]
         period = "深夜"
-        for h, p in periods:
+        for h, p in [(6,"深夜"),(12,"早晨"),(14,"午後"),(18,"下午"),(22,"晚上")]:
             if hour < h:
                 period = p
                 break
     except:
         tw_time, period = "--:--", "未知"
-
     tier_desc = {
         0: "正常節奏",
         1: "離開一小段時間，Nora有點不安",
@@ -138,7 +133,7 @@ def build_injection(data: dict) -> str:
 # ── 原有端點 ──
 @app.get("/")
 def root():
-    return {"status": "Nora API running", "version": "2.0"}
+    return {"status": "Nora API running", "version": "2.1"}
 
 @app.get("/status/{user_id}")
 def get_status(user_id: str):
@@ -187,32 +182,108 @@ def update_stats(user_id: str, data: StatsUpdate):
     conn.close()
     return {"ok": True}
 
-# ── OpenAI 格式中間層（給 Quackai 用）──
+# ── OpenAI 格式端點 ──
 @app.get("/v1/models")
-async def list_models(request: Request):
-    # Quackai 會先呼叫這個取得模型列表
+async def list_models():
     return {
         "object": "list",
         "data": [
             {"id": "claude-sonnet-4-20250514", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
             {"id": "claude-opus-4-20250514", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
             {"id": "claude-haiku-4-5-20251001", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+            {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
+            {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
+            {"id": "deepseek-chat", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+            {"id": "deepseek-reasoner", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
         ]
     }
 
+async def call_anthropic(api_key, model, system_prompt, messages, max_tokens):
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": messages
+            }
+        )
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    result = response.json()
+    content = ""
+    for block in result.get("content", []):
+        if block.get("type") == "text":
+            content += block.get("text", "")
+    return content, result.get("usage", {})
+
+async def call_gemini(api_key, model, system_prompt, messages, max_tokens):
+    # Gemini 用 Google AI Studio API
+    gemini_model = model.replace("gemini-", "gemini-")
+    contents = []
+    if system_prompt:
+        contents.append({"role": "user", "parts": [{"text": f"[系統指令]\n{system_prompt}\n[/系統指令]\n\n請確認你已理解以上指令。"}]})
+        contents.append({"role": "model", "parts": [{"text": "已理解。"}]})
+    for m in messages:
+        role = "model" if m["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={api_key}",
+            headers={"content-type": "application/json"},
+            json={
+                "contents": contents,
+                "generationConfig": {"maxOutputTokens": max_tokens}
+            }
+        )
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    result = response.json()
+    content = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    return content, {}
+
+async def call_deepseek(api_key, model, system_prompt, messages, max_tokens):
+    msgs = []
+    if system_prompt:
+        msgs.append({"role": "system", "content": system_prompt})
+    msgs.extend(messages)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "content-type": "application/json"
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": msgs
+            }
+        )
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    result = response.json()
+    content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return content, result.get("usage", {})
+
 @app.post("/v1/chat/completions")
 async def openai_chat(request: Request):
-    # 讀取請求
     body = await request.json()
     api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
-
     messages = body.get("messages", [])
     model = body.get("model", "claude-sonnet-4-20250514")
     max_tokens = body.get("max_tokens", 2048)
-    stream = body.get("stream", False)
 
-    # user_id 從第一條 system message 裡找，找不到用 default
-    user_id = "default"
+    # user_id 用 api_key 後8碼
+    user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
+
+    # 分離 system messages
     system_parts = []
     non_system = []
     for m in messages:
@@ -228,33 +299,18 @@ async def openai_chat(request: Request):
     system_parts.append(injection)
     system_prompt = "\n\n".join(system_parts)
 
-    # 轉換為 Anthropic 格式並呼叫
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": model,
-                "max_tokens": max_tokens,
-                "system": system_prompt,
-                "messages": non_system
-            }
-        )
+    # 根據模型名稱判斷轉發給哪個 API
+    model_lower = model.lower()
+    if "claude" in model_lower:
+        content, usage = await call_anthropic(api_key, model, system_prompt, non_system, max_tokens)
+    elif "gemini" in model_lower:
+        content, usage = await call_gemini(api_key, model, system_prompt, non_system, max_tokens)
+    elif "deepseek" in model_lower:
+        content, usage = await call_deepseek(api_key, model, system_prompt, non_system, max_tokens)
+    else:
+        # 預設走 Anthropic
+        content, usage = await call_anthropic(api_key, model, system_prompt, non_system, max_tokens)
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    result = response.json()
-    content = ""
-    for block in result.get("content", []):
-        if block.get("type") == "text":
-            content += block.get("text", "")
-
-    # 用 OpenAI 格式回傳給 Quackai
     return {
         "id": "chatcmpl-nora",
         "object": "chat.completion",
@@ -262,11 +318,8 @@ async def openai_chat(request: Request):
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content
-            },
+            "message": {"role": "assistant", "content": content},
             "finish_reason": "stop"
         }],
-        "usage": result.get("usage", {})
+        "usage": usage
     }
