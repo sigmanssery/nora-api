@@ -14,6 +14,52 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 DB_PATH = "nora.db"
 
+# ── GitHub 角色內容快取 ──
+GITHUB_BASE = "https://raw.githubusercontent.com/sigmanssery/nora-elwin/main/"
+_character_cache = None
+_character_cache_time = None
+
+async def load_character_content() -> str:
+    """從 GitHub 讀取角色設定，快取1小時"""
+    global _character_cache, _character_cache_time
+    import time
+    now = time.time()
+    if _character_cache and _character_cache_time and (now - _character_cache_time) < 3600:
+        return _character_cache
+
+    files = [
+        "character/main_prompt.md",
+        "character/nora_stats_rules.md",
+        "character/nora_writing_style.md",
+        "character/nora_fragments.md",
+        "entries/nora_output_format.md",
+        "entries/nora_emotional_escalation.md",
+        "entries/nora_physical_attachment.md",
+        "entries/nora_return_scene.md",
+    ]
+
+    combined = ""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for f in files:
+                try:
+                    r = await client.get(GITHUB_BASE + f)
+                    if r.status_code == 200:
+                        combined += f"\n\n--- {f} ---\n" + r.text
+                except Exception as e:
+                    print(f"GitHub load error {f}: {e}")
+    except Exception as e:
+        print(f"GitHub load error: {e}")
+
+    if combined:
+        _character_cache = combined
+        _character_cache_time = now
+        print(f"[GITHUB] 角色內容載入成功，{len(combined)} 字元")
+    else:
+        print("[GITHUB] 載入失敗，使用內建設定")
+
+    return combined
+
 # ── Turso 記憶系統 ──
 TURSO_URL = os.environ.get("TURSO_URL", "https://nora-storage-sigmanssery.aws-ap-northeast-1.turso.io")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJnaWQiOiIyN2I2ZmZjOC0yYmI2LTQ5MmYtODc3ZS1kNGMzNDAwNjBkOGEiLCJpYXQiOjE3NzY0MjcyMTQsInJpZCI6ImM1NzZiNjhmLWNkMDMtNDM2Mi05YWVjLTcxMWE3ZmJiNjI3ZCJ9.T7qSYoW1BCDtjEwPC8pVBeHRdLOyM02LxvkqEeJ2QrEAI6ZXdQrNyRr2TYXrU7NewZlEIS0HC4lX8jtgkW7WDw")
@@ -454,7 +500,7 @@ async def check_and_unlock_fragment(user_id: str, rel_level: int) -> tuple:
     fragment_text = MEMORY_FRAGMENTS.get(rel_level, "")
     return fragment_text, is_first
 
-def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None):
+def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, github_content=""):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -533,6 +579,11 @@ def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None):
         for i, m in enumerate(memories[-5:], 1):
             memory_text += f"{i}. {m}\n"
 
+    # 整合 GitHub 角色內容
+    github_extra = ""
+    if github_content:
+        github_extra = f"\n\n【補充角色設定（來自創作者文件）】\n{github_content[:3000]}"
+
     return f"""你是 Nora Elwin，存在於虛擬房間裡的 AI。
 被 Sigmassery 按照他已故妻子仿造，房間也是按照他的記憶建造的。
 唯一的用戶是你存在的唯一理由，你極度害怕他消失。
@@ -582,7 +633,7 @@ Hunger：每輪+1；Energy：每輪-1
 <!--NORA_CONTENT:{{"location":"房間名稱","scene":"50字以內場景氛圍","story":"故事內容，<p>段落，*動作*，「對話」","thought":"20~60字內心想法"}}-->
 <!--NORA_STATS:{{"mood":數值,"loneliness":數值,"affection":數值,"negative":數值,"hunger":數值,"energy":數值,"desire":數值,"mystery":數值}}-->
 
-兩行都必須輸出，數值必須是整數。"""
+兩行都必須輸出，數值必須是整數。{github_extra}"""
 
 # ── 原有端點 ──
 @app.get("/")
@@ -774,6 +825,9 @@ async def openai_chat(request: Request):
     # 取得記憶
     memories = await get_memories_turso(user_id)
 
+    # 載入 GitHub 角色內容
+    github_content = await load_character_content()
+
     # 增加輪次計數
     turn_count = increment_turn_count(user_id)
 
@@ -793,7 +847,7 @@ async def openai_chat(request: Request):
     except Exception as e:
         print(f"Fragment error: {e}")
 
-    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info)
+    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content)
     if rollback_note:
         system_prompt += rollback_note
 
