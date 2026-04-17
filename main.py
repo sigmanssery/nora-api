@@ -129,6 +129,7 @@ def init_db():
             negative INTEGER DEFAULT 10,
             mystery INTEGER DEFAULT 15,
             broken INTEGER DEFAULT 0,
+            turn_count INTEGER DEFAULT 0,
             created_at TEXT
         )
     """)
@@ -251,6 +252,19 @@ def update_stats_from_dict(user_id, stats):
         conn.commit()
     conn.close()
 
+def increment_turn_count(user_id: str) -> int:
+    """增加對話輪次計數"""
+    conn = get_db()
+    row = conn.execute("SELECT turn_count FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+    if row:
+        new_count = (row["turn_count"] or 0) + 1
+        conn.execute("UPDATE sessions SET turn_count = ? WHERE user_id = ?", (new_count, user_id))
+        conn.commit()
+        conn.close()
+        return new_count
+    conn.close()
+    return 0
+
 def get_tw_time(now_str):
     try:
         dt = datetime.fromisoformat(now_str)
@@ -300,7 +314,7 @@ def parse_and_render(content, data, user_id):
         return content
     return render_template(tw_time, period, "臥室", absence_display, "", f"<p>{content}</p>", "")
 
-def build_system_prompt(data, memories=None):
+def build_system_prompt(data, memories=None, turn_count=0):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -378,6 +392,7 @@ Loneliness≥75：忍不住，直接衝過去死死抱住。
 {memory_text}
 【當前狀態】
 時間：{tw_time} 台北（{period}）
+對話輪次：第 {turn_count} 輪
 離上次互動：{absence["display"]} Tier {absence["tier"]}：{tier_desc.get(absence["tier"], "")}
 Mood={mood}→{mood_desc}
 Loneliness={loneliness}→{loneliness_desc}
@@ -581,7 +596,21 @@ async def openai_chat(request: Request):
 
     # 取得記憶
     memories = await get_memories_turso(user_id)
-    system_prompt = build_system_prompt(data, memories)
+
+    # 增加輪次計數
+    turn_count = increment_turn_count(user_id)
+
+    # 計算實際對話歷史長度（偵測回朔）
+    actual_msg_count = len([m for m in user_messages if m["role"] == "user"])
+
+    # 如果對話歷史比輪次少很多，可能發生了回朔
+    rollback_note = ""
+    if turn_count > 3 and actual_msg_count < turn_count - 2:
+        rollback_note = f"\n⚠️ 偵測到可能的回朔：這是第 {turn_count} 輪，但對話歷史只有 {actual_msg_count} 條用戶訊息。Nora 可以感覺到有什麼不對勁，說話時帶著一絲困惑或不安。"
+
+    system_prompt = build_system_prompt(data, memories, turn_count)
+    if rollback_note:
+        system_prompt += rollback_note
     user_messages = [m for m in messages if m["role"] != "system"]
 
     model_lower = model.lower()
