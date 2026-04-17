@@ -594,9 +594,32 @@ async def openai_chat(request: Request):
         user_msg = ""
         for m in user_messages:
             if m["role"] == "user":
-                user_msg = m["content"][-150:] if len(m["content"]) > 150 else m["content"]
+                raw = m["content"]
+                # 清理 Quackai 的格式標籤
+                import re as _re
+                # 提取引號內的實際對話
+                quoted = _re.findall(r"[\u300c\u300d\u201c\u201d]([^\u300c\u300d\u201c\u201d]{1,100})[\u300c\u300d\u201c\u201d]", raw)
+                if quoted:
+                    user_msg = "、".join(quoted[:3])
+                else:
+                    # 移除常見的格式標籤
+                    cleaned = _re.sub(r'USER扮演\S+\s*的行动[:：]', '', raw)
+                    cleaned = _re.sub("USER[^:]*[:]", "", raw)
+                    cleaned = _re.sub("USER[^\n]*", "", cleaned)
+                    cleaned = _re.sub("[^\n]*指导[^\n]*", "", cleaned)
+                    cleaned = " ".join(cleaned.split()).strip()
+                    user_msg = cleaned[:100] if len(cleaned) > 100 else cleaned
+
         s = data["stats"]
-        summary = f"用戶：{user_msg} | Nora：Mood={s['mood']} Loneliness={s['loneliness']} Affection={s['affection']}"
+        # 提取 Nora 回覆的關鍵情緒
+        nora_mood = ""
+        if s['loneliness'] >= 75: nora_mood = "非常孤獨"
+        elif s['loneliness'] >= 60: nora_mood = "有點孤獨"
+        elif s['mood'] >= 70: nora_mood = "心情好"
+        elif s['mood'] <= 35: nora_mood = "心情低落"
+        else: nora_mood = "平靜"
+
+        summary = f"用戶說：{user_msg} | Nora狀態：{nora_mood}（Mood={s['mood']} L={s['loneliness']} A={s['affection']}）"
         await save_memory_turso(user_id, summary)
     except Exception as e:
         print(f"Memory error: {e}")
