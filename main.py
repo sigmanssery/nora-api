@@ -399,6 +399,33 @@ Hunger：每輪+1；Energy：每輪-1
 def root():
     return {"status": "Nora API running", "version": "4.1"}
 
+@app.get("/test-turso")
+async def test_turso():
+    """測試 Turso 連線"""
+    url = os.environ.get("TURSO_URL", "未設定")
+    token_set = bool(os.environ.get("TURSO_TOKEN", ""))
+    
+    # 嘗試寫入
+    result = await turso_execute(
+        "INSERT INTO memories (user_id, summary, turn) VALUES (?, ?, ?)",
+        ["railway_test", "Railway連線測試", 999]
+    )
+    
+    # 嘗試讀取
+    read_result = await turso_execute("SELECT COUNT(*) as cnt FROM memories")
+    count = 0
+    if read_result:
+        rows = read_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", [])
+        if rows:
+            count = rows[0][0].get("value", 0)
+    
+    return {
+        "turso_url": url,
+        "token_set": token_set,
+        "write_result": result,
+        "row_count": count
+    }
+
 @app.get("/status/{user_id}")
 def get_status(user_id: str):
     data = get_user_data(user_id)
