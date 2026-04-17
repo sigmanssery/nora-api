@@ -145,6 +145,8 @@ async def load_character_content() -> str:
         "entries/nora_emotional_escalation.md",
         "entries/nora_physical_attachment.md",
         "entries/nora_return_scene.md",
+        "character/nora_dialogue_guide.md",
+        "character/nora_room_dialogues.md",
     ]
 
     combined = ""
