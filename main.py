@@ -748,12 +748,25 @@ async def call_deepseek(api_key, model, system_prompt, messages, max_tokens):
 
 @app.post("/v1/chat/completions")
 async def openai_chat(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        import sys
+        print(f"[ERROR] parse body: {e}", file=sys.stderr)
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        pass
+    except Exception as e:
+        import sys
+        print(f"[ERROR] openai_chat: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=str(e))
+    body = body
     api_key = request.headers.get("Authorization","").replace("Bearer ","")
     messages = body.get("messages",[])
     model = body.get("model","deepseek-chat")
     max_tokens = body.get("max_tokens", 2048)
     user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
+    user_messages = [m for m in messages if m["role"] != "system"]
 
     data = get_user_data(user_id)
     update_last_seen(user_id)
@@ -783,7 +796,6 @@ async def openai_chat(request: Request):
     system_prompt = build_system_prompt(data, memories, turn_count, fragment_info)
     if rollback_note:
         system_prompt += rollback_note
-    user_messages = [m for m in messages if m["role"] != "system"]
 
     model_lower = model.lower()
     if "claude" in model_lower:
@@ -849,10 +861,11 @@ async def openai_chat(request: Request):
         parts.append(f"狀態：{nora_mood}(M={s["mood"]} L={s["loneliness"]} A={s["affection"]})")
         summary = " | ".join(parts)
         await save_memory_turso(user_id, summary)
-        await save_memory_turso(user_id, summary)
     except Exception as e:
         print(f"Memory error: {e}")
 
+    import sys
+    print(f"[OK] response ready, content length={len(final_content)}", file=sys.stderr)
     return {
         "id": "chatcmpl-nora",
         "object": "chat.completion",
