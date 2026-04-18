@@ -995,6 +995,19 @@ def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, g
         for i, m in enumerate(memories[-5:], 1):
             memory_text += f"{i}. {m}\n"
 
+    # Nora 後台生活記錄
+    nora_life_text = ""
+    if nora_life:
+        life_lines = ["\n【Nora 最近的獨處記錄（用戶不在時）】"]
+        for rec in nora_life:
+            if isinstance(rec, dict):
+                life_lines.append(rec.get("time","") + " · " + rec.get("location",""))
+                life_lines.append("行動：" + rec.get("action",""))
+                life_lines.append("內心：" + rec.get("thought",""))
+                life_lines.append("")
+        life_lines.append("請自然地將以上記錄融入回覆，讓 Nora 表現出她真的經歷過這些時光。")
+        nora_life_text = "\n".join(life_lines)
+
     # 夢境觸發條件
     world_echo_text = ""
     if world_echo and world_count >= 2:
