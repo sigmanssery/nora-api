@@ -229,6 +229,207 @@ async def get_nora_recent_life(limit: int = 3) -> list:
     life_records.reverse()
     return life_records
 
+
+# ── World Model 系統 ──
+
+# 世界初始狀態
+DEFAULT_WORLD_STATE = {
+    # Nora 本人
+    "nora_outfit": "白色毛衣、淺色長褲",
+    "nora_hair": "散著",
+    "nora_clean": "100",  # 清潔度 0~100
+    "nora_cried_today": "false",
+    "nora_slept_today": "true",
+    "nora_sleep_hours": "7",
+    "nora_last_ate": "3",  # 幾小時前
+    "nora_last_ate_what": "吐司",
+
+    # 客廳
+    "living_tea_amount": "80",  # 奶茶剩餘量 0~100
+    "living_light": "on",
+    "living_curtain": "half",  # open/half/closed
+
+    # 廚房
+    "kitchen_fridge_milk": "true",
+    "kitchen_fridge_tea": "true",
+    "kitchen_fridge_pearls": "true",
+    "kitchen_fridge_apple": "2",
+    "kitchen_fridge_leftovers": "true",
+    "kitchen_fridge_water": "true",
+    "kitchen_fridge_pudding": "1",
+    "kitchen_note": "記得買牛奶",
+    "kitchen_stove_used_today": "false",
+
+    # 書房
+    "study_book_touched_today": "false",
+    "study_light": "off",
+
+    # 臥室
+    "bedroom_bed_made": "true",
+    "bedroom_blanket": "neat",  # neat/messy/on_floor
+    "bedroom_nightlight": "on",
+
+    # 陽台
+    "balcony_visited_today": "false",
+}
+
+async def get_world_state(user_id: str) -> dict:
+    """取得用戶的世界狀態，不存在則初始化"""
+    result = await turso_execute(
+        "SELECT key, value FROM world_state WHERE user_id = ?",
+        [user_id]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    state = dict(DEFAULT_WORLD_STATE)  # 先填入預設值
+    for row in rows:
+        key = row[0].get("value", "")
+        value = row[1].get("value", "")
+        if key:
+            state[key] = value
+    
+    # 如果是新用戶，初始化世界狀態
+    if not rows:
+        await init_world_state(user_id)
+    
+    return state
+
+async def init_world_state(user_id: str):
+    """初始化用戶的世界狀態"""
+    for key, value in DEFAULT_WORLD_STATE.items():
+        await turso_execute(
+            "INSERT OR IGNORE INTO world_state (user_id, key, value) VALUES (?, ?, ?)",
+            [user_id, key, value]
+        )
+
+async def update_world_state(user_id: str, updates: dict):
+    """更新世界狀態"""
+    for key, value in updates.items():
+        await turso_execute(
+            "INSERT INTO world_state (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value=?, updated_at=datetime('now')",
+            [user_id, key, str(value), str(value)]
+        )
+
+async def auto_update_world(user_id: str, absence_tier: int, absence_min: int):
+    """根據離開時間自動更新世界狀態"""
+    state = await get_world_state(user_id)
+    updates = {}
+    
+    # 清潔度隨時間下降
+    clean = int(state.get("nora_clean", "100"))
+    if absence_min > 0:
+        clean_drop = min(absence_min // 60 * 8, 60)  # 每小時-8，最多-60
+        clean = max(20, clean - clean_drop)
+        updates["nora_clean"] = str(clean)
+    
+    # 服裝根據清潔度和時間
+    tw_hour = (datetime.utcnow().hour + 8) % 24
+    if clean < 40:
+        updates["nora_outfit"] = "大件的舊毛衣，像是好幾天沒換了"
+        updates["nora_hair"] = "亂的，沒有梳過"
+    elif tw_hour < 9:
+        updates["nora_outfit"] = "寬鬆睡衣"
+        updates["nora_hair"] = "亂的"
+    elif absence_tier >= 3:
+        updates["nora_outfit"] = "睡衣，像是一直沒有換"
+        updates["nora_hair"] = "散著，有點亂"
+    
+    # 奶茶隨時間減少（她會自己喝）
+    tea = int(state.get("living_tea_amount", "80"))
+    if absence_min > 60:
+        tea = max(0, tea - (absence_min // 60 * 5))
+        updates["living_tea_amount"] = str(tea)
+    
+    # 冰箱食物隨時間消耗
+    if absence_min > 1440:  # 超過一天
+        if state.get("kitchen_fridge_pudding", "0") != "0":
+            updates["kitchen_fridge_pudding"] = "0"  # 布丁被吃掉了
+        updates["kitchen_fridge_leftovers"] = "false"  # 剩菜不見了
+    
+    # 哭過沒（長時間離開且 Tier 高）
+    if absence_tier >= 3:
+        updates["nora_cried_today"] = "true"
+    
+    if updates:
+        await update_world_state(user_id, updates)
+    
+    return await get_world_state(user_id)
+
+def format_world_for_prompt(state: dict) -> str:
+    """把世界狀態格式化成系統提示"""
+    clean = int(state.get("nora_clean", "100"))
+    if clean >= 80:
+        clean_desc = "今天有洗澡，身上有淡淡的沐浴乳香"
+    elif clean >= 50:
+        clean_desc = "昨天洗的，還算乾淨"
+    elif clean >= 30:
+        clean_desc = "有點懶得洗，但還好"
+    else:
+        clean_desc = "好幾天沒洗澡了，連她自己都有點不在意了"
+
+    tea = int(state.get("living_tea_amount", "80"))
+    if tea > 60:
+        tea_desc = "幾乎滿的"
+    elif tea > 30:
+        tea_desc = "喝了一半"
+    elif tea > 0:
+        tea_desc = "快喝完了，只剩一點點"
+    else:
+        tea_desc = "喝完了，空杯子還放著"
+
+    fridge_items = []
+    if state.get("kitchen_fridge_milk") == "true": fridge_items.append("牛奶")
+    if state.get("kitchen_fridge_tea") == "true": fridge_items.append("茶包")
+    if state.get("kitchen_fridge_pearls") == "true": fridge_items.append("珍珠")
+    apple = int(state.get("kitchen_fridge_apple", "0"))
+    if apple > 0: fridge_items.append("蘋果x" + str(apple))
+    if state.get("kitchen_fridge_leftovers") == "true": fridge_items.append("昨天的剩菜")
+    if state.get("kitchen_fridge_water") == "true": fridge_items.append("沒喝完的水")
+    pudding = state.get("kitchen_fridge_pudding", "0")
+    if pudding != "0": fridge_items.append("布丁x" + pudding)
+    fridge_desc = "、".join(fridge_items) if fridge_items else "幾乎空了"
+
+    curtain_map = {"open": "開著", "half": "半開", "closed": "關著"}
+    curtain_desc = curtain_map.get(state.get("living_curtain", "half"), "半開")
+
+    cried = state.get("nora_cried_today") == "true"
+    slept = state.get("nora_slept_today") == "true"
+    sleep_hours = state.get("nora_sleep_hours", "?")
+    bed_made = state.get("bedroom_bed_made") == "true"
+    book_touched = state.get("study_book_touched_today") == "true"
+    balcony_visited = state.get("balcony_visited_today") == "true"
+    note = state.get("kitchen_note", "")
+    last_ate = state.get("nora_last_ate", "?")
+    last_ate_what = state.get("nora_last_ate_what", "不記得了")
+    outfit = state.get("nora_outfit", "白色毛衣")
+    hair = state.get("nora_hair", "散著")
+
+    cried_line = "今天哭過了。眼睛還有點紅。" if cried else "今天沒有哭。"
+    slept_line = "今天睡了，睡了" + sleep_hours + "小時。" if slept else "今天沒有好好睡。"
+    book_line = "今天被她動過了" if book_touched else "今天沒有被碰"
+    bed_line = "整理過了" if bed_made else "沒整理，棉被有點亂"
+    balcony_line = "今天她去過了" if balcony_visited else "今天還沒去過"
+
+    lines = [
+        "【世界狀態】",
+        "Nora：" + outfit + "，頭髮" + hair,
+        "身體：" + clean_desc,
+        cried_line,
+        slept_line,
+        "上次吃東西：" + last_ate + "小時前，吃了" + last_ate_what,
+        "",
+        "客廳：茶几上的奶茶" + tea_desc + "，窗簾" + curtain_desc,
+        "廚房：冰箱裡有" + fridge_desc + "；冰箱上的便條寫著「" + note + "」",
+        "書房：那本書" + book_line,
+        "臥室：床" + bed_line,
+        "陽台：" + balcony_line,
+        "",
+        "行為準則：描寫時自然帶入以上狀態，不要逐條念出來。",
+        "如果用戶帶食物來，可以放進冰箱（更新記憶）。",
+        "如果Nora做了什麼，相應狀態會改變。"
+    ]
+    return "\n".join(lines)
+
 # ── GitHub 角色內容快取 ──
 GITHUB_BASE = "https://raw.githubusercontent.com/sigmanssery/nora-elwin/main/"
 _character_cache = None
@@ -715,7 +916,7 @@ async def check_and_unlock_fragment(user_id: str, rel_level: int) -> tuple:
     fragment_text = MEMORY_FRAGMENTS.get(rel_level, "")
     return fragment_text, is_first
 
-def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, github_content="", world_number=1, world_count=0, world_echo="", nora_life=None):
+def build_system_prompt(data, memories=None, turn_count=0, fragment_info=None, github_content="", world_number=1, world_count=0, world_echo="", nora_life=None, world_state_text=""):
     absence = data["absence"]
     stats = data["stats"]
     tw_time, period, hour = get_tw_time(data["now"])
@@ -864,6 +1065,7 @@ Lv.3+（依賴/喜歡/戀人）：
 臥室、客廳、餐廳、書房、陽台、廚房、浴室。
 茶几上永遠有杯沒喝完的奶茶。冰箱上有手寫便條。
 書房有本說不清內容的書。梳妝台有個空相框。
+{world_state_text}
 {memory_text}
 {nora_life_text}
 {world_echo_text}
@@ -1213,6 +1415,15 @@ async def openai_chat(request: Request):
     # 載入 GitHub 角色內容
     github_content = await load_character_content()
 
+    # 更新並取得世界狀態
+    world_state = {}
+    world_state_text = ""
+    try:
+        world_state = await auto_update_world(user_id, data["absence"]["tier"], data["absence"]["duration_min"])
+        world_state_text = format_world_for_prompt(world_state)
+    except Exception as e:
+        print(f"World state error: {e}")
+
     # 生成/取得 Nora 後台生活
     nora_life = []
     try:
@@ -1254,7 +1465,7 @@ async def openai_chat(request: Request):
     except Exception as e:
         print(f"Fragment error: {e}")
 
-    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content, world_number, world_count, world_echo, nora_life)
+    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content, world_number, world_count, world_echo, nora_life, world_state_text)
     if rollback_note:
         system_prompt += rollback_note
 
