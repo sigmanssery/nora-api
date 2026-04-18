@@ -1302,7 +1302,7 @@ async def dev_get_system_prompt(user_id: str, request: Request):
     }
 
 
-@app.post("/dev/trigger-nora-life")
+@app.get("/dev/trigger-nora-life")
 async def dev_trigger_nora_life(request: Request):
     if not check_dev_auth(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
