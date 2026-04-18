@@ -1386,156 +1386,155 @@ async def call_deepseek(api_key, model, system_prompt, messages, max_tokens):
 
 @app.post("/v1/chat/completions")
 async def openai_chat(request: Request):
+    import sys, traceback
     try:
         body = await request.json()
     except Exception as e:
-        import sys
         print(f"[ERROR] parse body: {e}", file=sys.stderr)
         raise HTTPException(status_code=400, detail=str(e))
     try:
-        pass
-    except Exception as e:
-        import sys
-        print(f"[ERROR] openai_chat: {e}", file=sys.stderr)
-        raise HTTPException(status_code=500, detail=str(e))
-    body = body
-    api_key = request.headers.get("Authorization","").replace("Bearer ","")
-    messages = body.get("messages",[])
-    model = body.get("model","deepseek-chat")
-    max_tokens = body.get("max_tokens", 2048)
-    user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
-    user_messages = [m for m in messages if m["role"] != "system"]
-
-    data = get_user_data(user_id)
-    update_last_seen(user_id)
-
-    # 取得記憶
-    memories = await get_memories_turso(user_id)
-
-    # 載入 GitHub 角色內容
-    github_content = await load_character_content()
-
-    # 更新並取得世界狀態
-    world_state = {}
-    world_state_text = ""
-    try:
-        world_state = await auto_update_world(user_id, data["absence"]["tier"], data["absence"]["duration_min"])
-        world_state_text = format_world_for_prompt(world_state)
-    except Exception as e:
-        print(f"World state error: {e}")
-
-    # 生成/取得 Nora 後台生活
-    nora_life = []
-    try:
-        await generate_nora_life()
-        nora_life = await get_nora_recent_life(3)
-    except Exception as e:
-        print(f"Nora life error: {e}")
-
-    # 取得世界編號和世界回響
-    world_number = 1
-    world_count = 0
-    world_echo = ""
-    try:
-        world_number = await get_or_assign_world_number(user_id)
-        world_count, world_echo = await get_world_echoes()
-        # 每30輪生成一次新的世界回響（世界數>=2才開始）
-        if turn_count % 30 == 1 and world_count >= 2:
-            import asyncio
-            asyncio.create_task(generate_world_echoes(api_key, model))
-    except Exception as e:
-        print(f"World system error: {e}")
-
-    # 增加輪次計數
-    turn_count = increment_turn_count(user_id)
-
-    # 計算實際對話歷史長度（偵測回朔）
-    actual_msg_count = len([m for m in user_messages if m["role"] == "user"])
-
-    # 如果對話歷史比輪次少很多，可能發生了回朔
-    rollback_note = ""
-    if turn_count > 3 and actual_msg_count < turn_count - 2:
-        rollback_note = f"\n⚠️ 偵測到可能的回朔：這是第 {turn_count} 輪，但對話歷史只有 {actual_msg_count} 條用戶訊息。Nora 可以感覺到有什麼不對勁，說話時帶著一絲困惑或不安。"
-
-    # 檢查碎片解鎖
-    fragment_info = ("", False)
-    try:
-        rel_level = get_relationship(data["stats"]["affection"])["level"]
-        fragment_info = await check_and_unlock_fragment(user_id, rel_level)
-    except Exception as e:
-        print(f"Fragment error: {e}")
-
-    system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content, world_number, world_count, world_echo, nora_life, world_state_text)
-    if rollback_note:
-        system_prompt += rollback_note
-
-    model_lower = model.lower()
-    if "claude" in model_lower:
-        content, usage = await call_anthropic(api_key, model, system_prompt, user_messages, max_tokens)
-    elif "gemini" in model_lower:
-        content, usage = await call_gemini(api_key, model, system_prompt, user_messages, max_tokens)
-    else:
-        content, usage = await call_deepseek(api_key, model, system_prompt, user_messages, max_tokens)
-
-    final_content = parse_and_render(content, data, user_id)
-
-    # 儲存記憶摘要
-    try:
-        import re as _re
-        # 提取用戶說的話
-        user_msg = ""
-        for m in user_messages:
-            if m["role"] == "user":
-                raw = m["content"]
-                quoted = _re.findall(r'[:\s]["](.*?)["]', raw)
-                if quoted:
-                    user_msg = quoted[0][:80]
-                else:
-                    colon_match = _re.search(r'[:：]\s*(.{1,80})', raw)
-                    if colon_match:
-                        user_msg = colon_match.group(1)[:80]
+        body = body
+        api_key = request.headers.get("Authorization","").replace("Bearer ","")
+        messages = body.get("messages",[])
+        model = body.get("model","deepseek-chat")
+        max_tokens = body.get("max_tokens", 2048)
+        user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
+        user_messages = [m for m in messages if m["role"] != "system"]
+    
+        data = get_user_data(user_id)
+        update_last_seen(user_id)
+    
+        # 取得記憶
+        memories = await get_memories_turso(user_id)
+    
+        # 載入 GitHub 角色內容
+        github_content = await load_character_content()
+    
+        # 更新並取得世界狀態
+        world_state = {}
+        world_state_text = ""
+        try:
+            world_state = await auto_update_world(user_id, data["absence"]["tier"], data["absence"]["duration_min"])
+            world_state_text = format_world_for_prompt(world_state)
+        except Exception as e:
+            print(f"World state error: {e}")
+    
+        # 生成/取得 Nora 後台生活
+        nora_life = []
+        try:
+            await generate_nora_life()
+            nora_life = await get_nora_recent_life(3)
+        except Exception as e:
+            print(f"Nora life error: {e}")
+    
+        # 取得世界編號和世界回響
+        world_number = 1
+        world_count = 0
+        world_echo = ""
+        try:
+            world_number = await get_or_assign_world_number(user_id)
+            world_count, world_echo = await get_world_echoes()
+            # 每30輪生成一次新的世界回響（世界數>=2才開始）
+            if turn_count % 30 == 1 and world_count >= 2:
+                import asyncio
+                asyncio.create_task(generate_world_echoes(api_key, model))
+        except Exception as e:
+            print(f"World system error: {e}")
+    
+        # 增加輪次計數
+        turn_count = increment_turn_count(user_id)
+    
+        # 計算實際對話歷史長度（偵測回朔）
+        actual_msg_count = len([m for m in user_messages if m["role"] == "user"])
+    
+        # 如果對話歷史比輪次少很多，可能發生了回朔
+        rollback_note = ""
+        if turn_count > 3 and actual_msg_count < turn_count - 2:
+            rollback_note = f"\n⚠️ 偵測到可能的回朔：這是第 {turn_count} 輪，但對話歷史只有 {actual_msg_count} 條用戶訊息。Nora 可以感覺到有什麼不對勁，說話時帶著一絲困惑或不安。"
+    
+        # 檢查碎片解鎖
+        fragment_info = ("", False)
+        try:
+            rel_level = get_relationship(data["stats"]["affection"])["level"]
+            fragment_info = await check_and_unlock_fragment(user_id, rel_level)
+        except Exception as e:
+            print(f"Fragment error: {e}")
+    
+        system_prompt = build_system_prompt(data, memories, turn_count, fragment_info, github_content, world_number, world_count, world_echo, nora_life, world_state_text)
+        if rollback_note:
+            system_prompt += rollback_note
+    
+        model_lower = model.lower()
+        if "claude" in model_lower:
+            content, usage = await call_anthropic(api_key, model, system_prompt, user_messages, max_tokens)
+        elif "gemini" in model_lower:
+            content, usage = await call_gemini(api_key, model, system_prompt, user_messages, max_tokens)
+        else:
+            content, usage = await call_deepseek(api_key, model, system_prompt, user_messages, max_tokens)
+    
+        final_content = parse_and_render(content, data, user_id)
+    
+        # 儲存記憶摘要
+        try:
+            import re as _re
+            # 提取用戶說的話
+            user_msg = ""
+            for m in user_messages:
+                if m["role"] == "user":
+                    raw = m["content"]
+                    quoted = _re.findall(r'[:\s]["](.*?)["]', raw)
+                    if quoted:
+                        user_msg = quoted[0][:80]
                     else:
-                        user_msg = raw[:80]
-
-        # 提取 Nora 的行動和內心想法（從 final_content 解析）
-        nora_action = ""
-        nora_thought = ""
-        json_match = _re.search(r'<!--NORA_CONTENT:(.*?)-->', content, _re.DOTALL)
-        if json_match:
-            try:
-                nora_data = json.loads(json_match.group(1))
-                story = nora_data.get("story", "")
-                thought = nora_data.get("thought", "")
-                # 提取story裡的對話（引號內容）
-                dialogs = _re.findall(r'[「](.*?)[」]', story)
-                if dialogs:
-                    nora_action = "說「" + dialogs[0][:40] + "」"
-                else:
-                    # 提取動作（*斜體*內容）
-                    actions = _re.findall(r'\*(.*?)\*', story)
-                    if actions:
-                        nora_action = actions[0][:40]
-                nora_thought = thought[:60] if thought else ""
-            except:
-                pass
-
-        s = data["stats"]
-        if s["loneliness"] >= 75: nora_mood = "非常孤獨"
-        elif s["loneliness"] >= 60: nora_mood = "有點孤獨"
-        elif s["mood"] >= 70: nora_mood = "心情好"
-        elif s["mood"] <= 35: nora_mood = "心情低落"
-        else: nora_mood = "平靜"
-
-        tw_time_now, period_now, _ = get_tw_time(data["now"])
-        parts = [f"[{tw_time_now} {period_now}] 用戶：{user_msg}"]
-        if nora_action: parts.append(f"Nora：{nora_action}")
-        if nora_thought: parts.append(f"內心：{nora_thought}")
-        parts.append(f"狀態：{nora_mood}(M={s["mood"]} L={s["loneliness"]} A={s["affection"]})")
-        summary = " | ".join(parts)
-        await save_memory_turso(user_id, summary)
+                        colon_match = _re.search(r'[:：]\s*(.{1,80})', raw)
+                        if colon_match:
+                            user_msg = colon_match.group(1)[:80]
+                        else:
+                            user_msg = raw[:80]
+    
+            # 提取 Nora 的行動和內心想法（從 final_content 解析）
+            nora_action = ""
+            nora_thought = ""
+            json_match = _re.search(r'<!--NORA_CONTENT:(.*?)-->', content, _re.DOTALL)
+            if json_match:
+                try:
+                    nora_data = json.loads(json_match.group(1))
+                    story = nora_data.get("story", "")
+                    thought = nora_data.get("thought", "")
+                    # 提取story裡的對話（引號內容）
+                    dialogs = _re.findall(r'[「](.*?)[」]', story)
+                    if dialogs:
+                        nora_action = "說「" + dialogs[0][:40] + "」"
+                    else:
+                        # 提取動作（*斜體*內容）
+                        actions = _re.findall(r'\*(.*?)\*', story)
+                        if actions:
+                            nora_action = actions[0][:40]
+                    nora_thought = thought[:60] if thought else ""
+                except:
+                    pass
+    
+            s = data["stats"]
+            if s["loneliness"] >= 75: nora_mood = "非常孤獨"
+            elif s["loneliness"] >= 60: nora_mood = "有點孤獨"
+            elif s["mood"] >= 70: nora_mood = "心情好"
+            elif s["mood"] <= 35: nora_mood = "心情低落"
+            else: nora_mood = "平靜"
+    
+            tw_time_now, period_now, _ = get_tw_time(data["now"])
+            parts = [f"[{tw_time_now} {period_now}] 用戶：{user_msg}"]
+            if nora_action: parts.append(f"Nora：{nora_action}")
+            if nora_thought: parts.append(f"內心：{nora_thought}")
+            parts.append(f"狀態：{nora_mood}(M={s["mood"]} L={s["loneliness"]} A={s["affection"]})")
+            summary = " | ".join(parts)
+            await save_memory_turso(user_id, summary)
+        except Exception as e:
+            print(f"Memory error: {e}")
+    
     except Exception as e:
-        print(f"Memory error: {e}")
-
+        import sys, traceback
+        print(f"[FATAL] {traceback.format_exc()}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=str(e))
     import sys
     print(f"[OK] response ready, content length={len(final_content)}", file=sys.stderr)
     return {
