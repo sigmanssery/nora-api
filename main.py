@@ -904,7 +904,7 @@ Hunger：每輪+1；Energy：每輪-1
 
 
 # ── 開發者面板 API ──
-DEV_KEY_SUFFIX = os.environ.get("DEV_KEY_SUFFIX", "")  # 你的 API Key 後8碼
+DEV_KEY_SUFFIX = os.environ.get("DEV_KEY_SUFFIX", "fbbe0d46")  # 你的 API Key 後8碼
 
 def check_dev_auth(request: Request) -> bool:
     """驗證開發者身份"""
