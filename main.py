@@ -1135,7 +1135,7 @@ def generate_token() -> str:
 async def save_token(token: str, username: str):
     """儲存 token 到 Turso（30天有效）"""
     await turso_execute(
-        "INSERT OR REPLACE INTO sessions (token, username, expires_at) VALUES (?, ?, datetime('now', '+30 days'))",
+        "INSERT OR REPLACE INTO auth_tokens (token, username, expires_at) VALUES (?, ?, datetime('now', '+30 days'))",
         [token, username]
     )
 
@@ -1144,7 +1144,7 @@ async def get_user_by_token(token: str) -> str:
     if not token:
         return None
     result = await turso_execute(
-        "SELECT username FROM sessions WHERE token = ? AND expires_at > datetime('now')",
+        "SELECT username FROM auth_tokens WHERE token = ? AND expires_at > datetime('now')",
         [token]
     )
     rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
@@ -1154,7 +1154,7 @@ async def get_user_by_token(token: str) -> str:
 
 async def delete_token(token: str):
     """登出——刪除 token"""
-    await turso_execute("DELETE FROM sessions WHERE token = ?", [token])
+    await turso_execute("DELETE FROM auth_tokens WHERE token = ?", [token])
 
 class RegisterRequest(BaseModel):
     username: str
