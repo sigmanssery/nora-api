@@ -1525,7 +1525,7 @@ async def openai_chat(request: Request):
             parts = [f"[{tw_time_now} {period_now}] 用戶：{user_msg}"]
             if nora_action: parts.append(f"Nora：{nora_action}")
             if nora_thought: parts.append(f"內心：{nora_thought}")
-            parts.append(f"狀態：{nora_mood}(M={s["mood"]} L={s["loneliness"]} A={s["affection"]})")
+            parts.append("狀態：" + nora_mood + "(M=" + str(s["mood"]) + " L=" + str(s["loneliness"]) + " A=" + str(s["affection"]) + ")")
             summary = " | ".join(parts)
             await save_memory_turso(user_id, summary)
         except Exception as e:
