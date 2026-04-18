@@ -186,27 +186,27 @@ Nora Elwin 獨自在虛擬房間的{location}裡，沒有用戶陪伴。
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 "https://api.deepseek.com/v1/chat/completions",
-                headers={{"Authorization": f"Bearer {{api_key}}", "content-type": "application/json"}},
-                json={{"model": "deepseek-chat", "max_tokens": 200, "messages": [{{"role": "user", "content": prompt}}]}}
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json={"model": "deepseek-chat", "max_tokens": 200, "messages": [{"role": "user", "content": prompt}]}
             )
         if r.status_code != 200:
             return
         
-        text = r.json().get("choices", [{{}}])[0].get("message", {{}}).get("content", "")
+        text = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
         import re as _re
-        match = _re.search(r'\{{.*?\}}', text, _re.DOTALL)
+        match = _re.search(r'{.*?}', text, _re.DOTALL)
         if not match:
             return
         
-        data = json.loads(match.group())
+        life_data = json.loads(match.group())
         await turso_execute(
             "INSERT INTO nora_life (tw_time, location, action, thought) VALUES (?, ?, ?, ?)",
-            [f"{{tw_time}} {{period}}", data.get("location", location), data.get("action", ""), data.get("thought", "")]
+            [tw_time + " " + period, life_data.get("location", location), life_data.get("action", ""), life_data.get("thought", "")]
         )
         _last_life_gen = now
-        print(f"[NORA_LIFE] {{tw_time}} {{period}} · {{location}}")
+        print(f"[NORA_LIFE] {tw_time} {period} · {location}")
     except Exception as e:
-        print(f"[NORA_LIFE] 生成失敗: {{e}}")
+        print(f"[NORA_LIFE] 生成失敗: {e}")
 
 async def get_nora_recent_life(limit: int = 3) -> list:
     """取得最近幾筆 Nora 的後台生活記錄"""
