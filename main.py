@@ -1119,6 +1119,180 @@ Hunger：每輪+1；Energy：每輪-1
 兩行都必須輸出，數值必須是整數。{github_extra}"""
 
 
+
+# ── 帳密系統 ──
+import hashlib
+import secrets
+
+def hash_password(password: str) -> str:
+    """SHA-256 密碼雜湊"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def generate_token() -> str:
+    """生成 session token"""
+    return secrets.token_hex(32)
+
+async def save_token(token: str, username: str):
+    """儲存 token 到 Turso（30天有效）"""
+    await turso_execute(
+        "INSERT OR REPLACE INTO sessions (token, username, expires_at) VALUES (?, ?, datetime('now', '+30 days'))",
+        [token, username]
+    )
+
+async def get_user_by_token(token: str) -> str:
+    """通過 token 取得 username，回傳 None 表示無效或過期"""
+    if not token:
+        return None
+    result = await turso_execute(
+        "SELECT username FROM sessions WHERE token = ? AND expires_at > datetime('now')",
+        [token]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    if rows:
+        return rows[0][0].get("value", "")
+    return None
+
+async def delete_token(token: str):
+    """登出——刪除 token"""
+    await turso_execute("DELETE FROM sessions WHERE token = ?", [token])
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    api_key: str = ""
+    preferred_model: str = "deepseek-chat"
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/auth/register")
+async def register(req: RegisterRequest):
+    # 驗證
+    if len(req.username) < 2 or len(req.username) > 20:
+        raise HTTPException(status_code=400, detail="用戶名長度需在 2~20 字元之間")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="密碼至少 6 個字元")
+    if not req.username.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="用戶名只能包含字母、數字、底線和連字號")
+
+    pw_hash = hash_password(req.password)
+    
+    try:
+        result = await turso_execute(
+            "INSERT INTO users (username, password_hash, api_key, preferred_model) VALUES (?, ?, ?, ?)",
+            [req.username, pw_hash, req.api_key, req.preferred_model]
+        )
+        if not result:
+            raise HTTPException(status_code=500, detail="註冊失敗")
+    except Exception as e:
+        if "UNIQUE" in str(e) or "unique" in str(e):
+            raise HTTPException(status_code=409, detail="用戶名已被使用")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # 自動登入
+    token = generate_token()
+    await save_token(token, req.username)
+    
+    return {
+        "token": token,
+        "username": req.username,
+        "user_id": req.username + "_nora"
+    }
+
+@app.post("/auth/login")
+async def login(req: LoginRequest):
+    pw_hash = hash_password(req.password)
+    
+    result = await turso_execute(
+        "SELECT username, api_key, preferred_model FROM users WHERE username = ? AND password_hash = ?",
+        [req.username, pw_hash]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    
+    if not rows:
+        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
+    
+    username = rows[0][0].get("value", "")
+    api_key = rows[0][1].get("value", "")
+    model = rows[0][2].get("value", "deepseek-chat")
+    
+    # 更新最後登入時間
+    await turso_execute(
+        "UPDATE users SET last_login = datetime('now') WHERE username = ?",
+        [username]
+    )
+    
+    token = generate_token()
+    await save_token(token, username)
+    
+    return {
+        "token": token,
+        "username": username,
+        "api_key": api_key,
+        "preferred_model": model,
+        "user_id": username + "_nora"
+    }
+
+@app.get("/auth/me")
+async def get_me(request: Request):
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    username = await get_user_by_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="請先登入")
+    
+    result = await turso_execute(
+        "SELECT username, api_key, preferred_model, created_at FROM users WHERE username = ?",
+        [username]
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="用戶不存在")
+    
+    return {
+        "username": username,
+        "api_key": rows[0][1].get("value", ""),
+        "preferred_model": rows[0][2].get("value", ""),
+        "created_at": rows[0][3].get("value", ""),
+        "user_id": username + "_nora"
+    }
+
+@app.post("/auth/logout")
+async def logout(request: Request):
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if token:
+        await delete_token(token)
+    return {"ok": True}
+
+@app.put("/auth/update")
+async def update_user(request: Request, data: dict):
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    username = await get_user_by_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="請先登入")
+    
+    fields, values = [], []
+    if "api_key" in data:
+        fields.append("api_key = ?")
+        values.append(data["api_key"])
+    if "preferred_model" in data:
+        fields.append("preferred_model = ?")
+        values.append(data["preferred_model"])
+    if "password" in data:
+        if len(data["password"]) < 6:
+            raise HTTPException(status_code=400, detail="密碼至少 6 個字元")
+        fields.append("password_hash = ?")
+        values.append(hash_password(data["password"]))
+    
+    if fields:
+        values.append(username)
+        await turso_execute(
+            f"UPDATE users SET {', '.join(fields)} WHERE username = ?",
+            values
+        )
+    
+    return {"ok": True}
+
 # ── 開發者面板 API ──
 DEV_KEY_SUFFIX = os.environ.get("DEV_KEY_SUFFIX", "fbbe0d46")  # 你的 API Key 後8碼
 
@@ -1508,11 +1682,31 @@ async def openai_chat(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
     try:
         body = body
-        api_key = request.headers.get("Authorization","").replace("Bearer ","")
+        auth_header = request.headers.get("Authorization","").replace("Bearer ","")
         messages = body.get("messages",[])
         model = body.get("model","deepseek-chat")
         max_tokens = body.get("max_tokens", 2048)
-        user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
+
+        # 支援兩種認證：token 登入 或 直接帶 API Key
+        username = await get_user_by_token(auth_header)
+        if username:
+            # token 登入——從 users 表取 API Key
+            user_result = await turso_execute(
+                "SELECT api_key, preferred_model FROM users WHERE username = ?",
+                [username]
+            )
+            user_rows = user_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if user_result else []
+            if user_rows:
+                api_key = user_rows[0][0].get("value", "")
+                if not model or model == "deepseek-chat":
+                    model = user_rows[0][1].get("value", "deepseek-chat")
+            else:
+                api_key = ""
+            user_id = username + "_nora"
+        else:
+            # 直接帶 API Key（舊模式）
+            api_key = auth_header
+            user_id = (api_key[-8:] + "_nora") if api_key else "default_nora"
         user_messages = [m for m in messages if m["role"] != "system"]
     
         data = get_user_data(user_id)
