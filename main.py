@@ -1235,6 +1235,72 @@ async def dev_get_nora_life(request: Request):
         })
     return {"nora_life": life}
 
+
+@app.get("/dev/system-prompt/{user_id}")
+async def dev_get_system_prompt(user_id: str, request: Request):
+    if not check_dev_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    data = get_user_data(user_id)
+    memories = await get_memories_turso(user_id)
+    github_content = await load_character_content()
+    
+    world_state_text = ""
+    try:
+        world_state = await auto_update_world(user_id, data["absence"]["tier"], data["absence"]["duration_min"])
+        world_state_text = format_world_for_prompt(world_state)
+    except:
+        pass
+    
+    nora_life = []
+    try:
+        nora_life = await get_nora_recent_life(3)
+    except:
+        pass
+    
+    world_number = 1
+    world_count = 0
+    world_echo = ""
+    try:
+        world_number = await get_or_assign_world_number(user_id)
+        world_count, world_echo = await get_world_echoes()
+    except:
+        pass
+    
+    turn_count = 0
+    try:
+        conn = get_db()
+        row = conn.execute("SELECT turn_count FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        if row:
+            turn_count = row["turn_count"] or 0
+    except:
+        pass
+    
+    fragment_info = ("", False)
+    try:
+        rel_level = get_relationship(data["stats"]["affection"])["level"]
+        fragment_info = await check_and_unlock_fragment(user_id, rel_level)
+    except:
+        pass
+    
+    prompt = build_system_prompt(
+        data, memories, turn_count, fragment_info,
+        github_content, world_number, world_count, world_echo,
+        nora_life, world_state_text
+    )
+    
+    return {
+        "user_id": user_id,
+        "prompt_length": len(prompt),
+        "memories_count": len(memories),
+        "nora_life_count": len(nora_life),
+        "world_number": world_number,
+        "world_count": world_count,
+        "turn_count": turn_count,
+        "prompt": prompt
+    }
+
 # ── 原有端點 ──
 @app.get("/")
 def root():
