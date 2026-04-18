@@ -1510,6 +1510,48 @@ async def get_waiting_monologues(user_id: str):
     monologues.reverse()
     return {"monologues": monologues}
 
+
+@app.get("/dev/test-token-save")
+async def test_token_save():
+    """測試 token 儲存"""
+    import traceback
+    test_token = "test_token_12345"
+    test_user = "test_user"
+    
+    # 嘗試寫入
+    write_err = ""
+    try:
+        result = await turso_execute(
+            "INSERT OR REPLACE INTO auth_tokens (token, username, expires_at) VALUES (?, ?, datetime('now', '+30 days'))",
+            [test_token, test_user]
+        )
+        write_ok = result is not None
+        write_err = str(result) if result else "result is None"
+    except Exception as e:
+        write_ok = False
+        write_err = traceback.format_exc()
+    
+    # 嘗試讀取
+    read_result = None
+    read_err = ""
+    try:
+        read_result = await turso_execute(
+            "SELECT username FROM auth_tokens WHERE token = ?",
+            [test_token]
+        )
+        rows = read_result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if read_result else []
+        found = rows[0][0].get("value", "") if rows else "NOT FOUND"
+    except Exception as e:
+        found = "ERROR"
+        read_err = str(e)
+    
+    return {
+        "write_ok": write_ok,
+        "write_err": write_err[:200],
+        "found": found,
+        "read_err": read_err
+    }
+
 # ── 原有端點 ──
 @app.get("/")
 def root():
