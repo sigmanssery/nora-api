@@ -1307,10 +1307,15 @@ async def dev_trigger_nora_life(request: Request):
     if not check_dev_auth(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     global _last_life_gen
-    _last_life_gen = None  # 清除快取強制重新生成
-    await generate_nora_life()
+    _last_life_gen = None
+    error_msg = ""
+    try:
+        await generate_nora_life()
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
     life = await get_nora_recent_life(1)
-    return {"triggered": True, "latest": life[0] if life else None}
+    return {"triggered": True, "latest": life[0] if life else None, "error": error_msg, "api_key_set": bool(NORA_OWN_API_KEY)}
 
 # ── 原有端點 ──
 @app.get("/")
