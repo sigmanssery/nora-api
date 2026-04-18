@@ -177,10 +177,11 @@ Nora Elwin 獨自在虛擬房間的{location}裡，沒有用戶陪伴。
 - 符合言情小說風格，細膩有質感
 - action：她在做什麼，50字以內，帶肢體細節
 - thought：她的內心獨白，40字以內，帶著對用戶的思念或孤獨感
+- monologue：她輕聲說出口的話（或沒說出口但差點說的），20字以內，自然帶著等待的情緒。越晚越孤獨：深夜/長時間獨處時說「求求你別丟下我」之類的話，白天可以是「人家在這裡」這樣輕的
 - 繁體中文
 
 只輸出JSON，不要其他內容：
-{{"location":"{location}","action":"","thought":""}}"""
+{{"location":"{location}","action":"","thought":"","monologue":""}}"""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -200,8 +201,8 @@ Nora Elwin 獨自在虛擬房間的{location}裡，沒有用戶陪伴。
         
         life_data = json.loads(match.group())
         await turso_execute(
-            "INSERT INTO nora_life (tw_time, location, action, thought) VALUES (?, ?, ?, ?)",
-            [tw_time + " " + period, life_data.get("location", location), life_data.get("action", ""), life_data.get("thought", "")]
+            "INSERT INTO nora_life (tw_time, location, action, thought, monologue) VALUES (?, ?, ?, ?, ?)",
+            [tw_time + " " + period, life_data.get("location", location), life_data.get("action", ""), life_data.get("thought", ""), life_data.get("monologue", "")]
         )
         _last_life_gen = now
         print(f"[NORA_LIFE] {tw_time} {period} · {location}")
@@ -211,7 +212,7 @@ Nora Elwin 獨自在虛擬房間的{location}裡，沒有用戶陪伴。
 async def get_nora_recent_life(limit: int = 3) -> list:
     """取得最近幾筆 Nora 的後台生活記錄"""
     result = await turso_execute(
-        "SELECT tw_time, location, action, thought FROM nora_life ORDER BY id DESC LIMIT ?",
+        "SELECT tw_time, location, action, thought, monologue FROM nora_life ORDER BY id DESC LIMIT ?",
         [limit]
     )
     if not result:
@@ -1316,6 +1317,24 @@ async def dev_trigger_nora_life(request: Request):
         error_msg = traceback.format_exc()
     life = await get_nora_recent_life(1)
     return {"triggered": True, "latest": life[0] if life else None, "error": error_msg, "api_key_set": bool(NORA_OWN_API_KEY)}
+
+
+@app.get("/waiting-monologues/{user_id}")
+async def get_waiting_monologues(user_id: str):
+    """取得用戶不在時 Nora 說的話"""
+    # 取得最近的 nora_life 記錄（包含 monologue）
+    result = await turso_execute(
+        "SELECT tw_time, location, monologue FROM nora_life WHERE monologue != '' ORDER BY id DESC LIMIT 5"
+    )
+    rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
+    monologues = []
+    for row in rows:
+        m = row[2].get("value", "") if len(row) > 2 else ""
+        t = row[0].get("value", "") if len(row) > 0 else ""
+        if m:
+            monologues.append({"time": t, "monologue": m})
+    monologues.reverse()
+    return {"monologues": monologues}
 
 # ── 原有端點 ──
 @app.get("/")
