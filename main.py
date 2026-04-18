@@ -1517,7 +1517,8 @@ async def openai_chat(request: Request):
         # 生成/取得 Nora 後台生活
         nora_life = []
         try:
-            await generate_nora_life()
+            import asyncio
+            asyncio.ensure_future(generate_nora_life())  # 背景執行，不阻塞
             nora_life = await get_nora_recent_life(3)
         except Exception as e:
             print(f"Nora life error: {e}")
