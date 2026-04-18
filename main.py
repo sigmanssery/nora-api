@@ -916,6 +916,17 @@ def check_dev_auth(request: Request) -> bool:
         return True
     return False
 
+@app.get("/dev/debug-auth")
+async def dev_debug_auth(request: Request):
+    auth = request.headers.get("Authorization", "")
+    suffix = DEV_KEY_SUFFIX
+    return {
+        "auth_received": auth,
+        "suffix_set": bool(suffix),
+        "suffix_preview": suffix[:3] + "..." if suffix else "空",
+        "match": auth.replace("Bearer ", "").endswith(suffix) if suffix else False
+    }
+
 @app.get("/dev/users")
 async def dev_get_users(request: Request):
     if not check_dev_auth(request):
