@@ -1301,6 +1301,17 @@ async def dev_get_system_prompt(user_id: str, request: Request):
         "prompt": prompt
     }
 
+
+@app.post("/dev/trigger-nora-life")
+async def dev_trigger_nora_life(request: Request):
+    if not check_dev_auth(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    global _last_life_gen
+    _last_life_gen = None  # 清除快取強制重新生成
+    await generate_nora_life()
+    life = await get_nora_recent_life(1)
+    return {"triggered": True, "latest": life[0] if life else None}
+
 # ── 原有端點 ──
 @app.get("/")
 def root():
