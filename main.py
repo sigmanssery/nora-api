@@ -1552,6 +1552,60 @@ async def test_token_save():
         "read_err": read_err
     }
 
+
+@app.get("/my/status")
+async def my_status(request: Request):
+    """用戶查詢自己的 Nora 狀態——只回傳自己的資料"""
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="需要 API Key")
+    
+    user_id = api_key[-8:] + "_nora"
+    
+    # 基本數值
+    data = get_user_data(user_id)
+    
+    # 記憶
+    memories = await get_memories_turso(user_id)
+    
+    # 碎片
+    unlocked = await get_unlocked_fragments(user_id)
+    fragments = []
+    frag_names = {1:"熟人", 2:"依賴", 3:"喜歡", 4:"戀人"}
+    for fid in [1,2,3,4]:
+        fragments.append({
+            "id": fid,
+            "name": frag_names[fid],
+            "unlocked": fid in unlocked
+        })
+    
+    # 後台生活
+    nora_life = await get_nora_recent_life(5)
+    
+    # 關係等級
+    rel = get_relationship(data["stats"]["affection"])
+    
+    # 輪次
+    conn = get_db()
+    row = conn.execute("SELECT turn_count FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    turn_count = row["turn_count"] if row else 0
+    
+    return {
+        "user_id": user_id,
+        "turn_count": turn_count or 0,
+        "broken": data["broken"],
+        "relationship": {
+            "level": rel["level"],
+            "name": rel["name"]
+        },
+        "stats": data["stats"],
+        "absence": data["absence"],
+        "memories": memories[-5:],
+        "fragments": fragments,
+        "nora_life": nora_life
+    }
+
 # ── 原有端點 ──
 @app.get("/")
 def root():
