@@ -8,9 +8,17 @@ import httpx
 import json
 import re
 import os
+import sys
+import hashlib
+import secrets
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+def _env_list(name: str, default: str = "") -> list:
+    return [v.strip() for v in os.environ.get(name, default).split(",") if v.strip()]
+
+CORS_ORIGINS = _env_list("CORS_ORIGINS", "https://inausis.fyi,https://www.inausis.fyi")
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 DB_PATH = "nora.db"
 
@@ -131,7 +139,7 @@ Nora 是一個存在於虛擬房間的AI，她隱約感覺到自己在平行世�
 
 
 # ── Nora 後台生活系統 ──
-NORA_OWN_API_KEY = os.environ.get("NORA_API_KEY", "sk-f391773c671a47e19af509c9eaeaf812")
+NORA_OWN_API_KEY = os.environ.get("NORA_API_KEY", "")
 _last_life_gen = None
 
 async def generate_nora_life():
@@ -225,7 +233,8 @@ async def get_nora_recent_life(limit: int = 3) -> list:
                 "time": row[0].get("value", ""),
                 "location": row[1].get("value", ""),
                 "action": row[2].get("value", ""),
-                "thought": row[3].get("value", "")
+                "thought": row[3].get("value", ""),
+                "monologue": row[4].get("value", "") if len(row) > 4 else ""
             })
     life_records.reverse()
     return life_records
@@ -478,19 +487,26 @@ async def load_character_content() -> str:
     return combined
 
 # ── Turso 記憶系統 ──
-TURSO_URL = os.environ.get("TURSO_URL", "https://nora-storage-sigmanssery.aws-ap-northeast-1.turso.io")
-TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJnaWQiOiIyN2I2ZmZjOC0yYmI2LTQ5MmYtODc3ZS1kNGMzNDAwNjBkOGEiLCJpYXQiOjE3NzY0MjcyMTQsInJpZCI6ImM1NzZiNjhmLWNkMDMtNDM2Mi05YWVjLTcxMWE3ZmJiNjI3ZCJ9.T7qSYoW1BCDtjEwPC8pVBeHRdLOyM02LxvkqEeJ2QrEAI6ZXdQrNyRr2TYXrU7NewZlEIS0HC4lX8jtgkW7WDw")
+TURSO_URL = os.environ.get("TURSO_URL", "")
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
+DEV_ADMIN_TOKEN = os.environ.get("DEV_ADMIN_TOKEN", "")
 
-# Debug 用
-import sys
-print(f"[STARTUP] TURSO_URL={TURSO_URL[:30] if TURSO_URL else '未設定'}", file=sys.stderr)
-print(f"[STARTUP] TURSO_TOKEN={'已設定' if TURSO_TOKEN else '未設定'}", file=sys.stderr)
-print(f"[STARTUP] ALL_ENV_KEYS={[k for k in os.environ.keys() if 'TURSO' in k]}", file=sys.stderr)
+REQUIRED_ENV_VARS = ["TURSO_URL", "TURSO_TOKEN", "DEV_ADMIN_TOKEN"]
 
-async def turso_execute(sql: str, params: list = []):
+def validate_required_env():
+    missing = [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError("Missing required environment variables: " + ", ".join(missing))
+    if "*" in CORS_ORIGINS:
+        raise RuntimeError("CORS_ORIGINS must list explicit origins, not *")
+    print("[STARTUP] Required environment variables are set", file=sys.stderr)
+
+async def turso_execute(sql: str, params: list = None):
     """執行 Turso SQL"""
     if not TURSO_URL or not TURSO_TOKEN:
         return None
+    if params is None:
+        params = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -514,13 +530,15 @@ async def turso_execute(sql: str, params: list = []):
             )
         if response.status_code == 200:
             return response.json()
+        print(f"Turso error: HTTP {response.status_code} {response.text[:200]}", file=sys.stderr)
     except Exception as e:
         print(f"Turso error: {e}")
     return None
 
 async def init_turso():
-    """建立 Turso 記憶表"""
-    await turso_execute("""
+    """建立 Turso 所需資料表與索引"""
+    statements = [
+        """
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -528,10 +546,84 @@ async def init_turso():
             turn INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         )
-    """)
-    await turso_execute("""
-        CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id, turn)
-    """)
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id, turn)",
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            api_key TEXT DEFAULT '',
+            preferred_model TEXT DEFAULT 'deepseek-chat',
+            created_at TEXT DEFAULT (datetime('now')),
+            last_login TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_auth_tokens_username ON auth_tokens(username)",
+        """
+        CREATE TABLE IF NOT EXISTS fragments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            fragment_id INTEGER NOT NULL,
+            unlocked_at TEXT DEFAULT (datetime('now')),
+            shown_count INTEGER DEFAULT 0,
+            UNIQUE(user_id, fragment_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS nora_life (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tw_time TEXT NOT NULL,
+            location TEXT DEFAULT '',
+            action TEXT DEFAULT '',
+            thought TEXT DEFAULT '',
+            monologue TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS world_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS world_registry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL UNIQUE,
+            world_number INTEGER NOT NULL UNIQUE,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS world_echoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            world_count INTEGER DEFAULT 0,
+            echo_content TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+        """,
+    ]
+    for sql in statements:
+        result = await turso_execute(sql)
+        if not result:
+            raise RuntimeError("Failed to initialize Turso schema")
+
+@app.on_event("startup")
+async def app_startup():
+    validate_required_env()
+    await init_turso()
 
 async def save_memory_turso(user_id: str, summary: str):
     """儲存對話摘要到 Turso"""
@@ -1120,13 +1212,39 @@ Hunger：每輪+1；Energy：每輪-1
 
 
 
-# ── 帳密系統 ──
-import hashlib
-import secrets
-
 def hash_password(password: str) -> str:
-    """SHA-256 密碼雜湊"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """PBKDF2-HMAC-SHA256 密碼雜湊"""
+    iterations = int(os.environ.get("PASSWORD_HASH_ITERATIONS", "260000"))
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """驗證新格式密碼，並兼容舊版 unsalted SHA-256。"""
+    if not stored_hash:
+        return False
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, digest = stored_hash.split("$", 3)
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt),
+                int(iterations),
+            ).hex()
+            return secrets.compare_digest(candidate, digest)
+        except Exception:
+            return False
+    legacy = hashlib.sha256(password.encode()).hexdigest()
+    return secrets.compare_digest(legacy, stored_hash)
+
+def needs_password_rehash(stored_hash: str) -> bool:
+    return not stored_hash.startswith("pbkdf2_sha256$")
 
 def generate_token() -> str:
     """生成 session token"""
@@ -1202,26 +1320,33 @@ async def register(req: RegisterRequest):
 
 @app.post("/auth/login")
 async def login(req: LoginRequest):
-    pw_hash = hash_password(req.password)
-    
     result = await turso_execute(
-        "SELECT username, api_key, preferred_model FROM users WHERE username = ? AND password_hash = ?",
-        [req.username, pw_hash]
+        "SELECT username, password_hash, api_key, preferred_model FROM users WHERE username = ?",
+        [req.username]
     )
     rows = result.get("results", [{}])[0].get("response", {}).get("result", {}).get("rows", []) if result else []
     
     if not rows:
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
-    
+
     username = rows[0][0].get("value", "")
-    api_key = rows[0][1].get("value", "")
-    model = rows[0][2].get("value", "deepseek-chat")
+    stored_hash = rows[0][1].get("value", "")
+    if not verify_password(req.password, stored_hash):
+        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
+    
+    api_key = rows[0][2].get("value", "")
+    model = rows[0][3].get("value", "deepseek-chat")
     
     # 更新最後登入時間
     await turso_execute(
         "UPDATE users SET last_login = datetime('now') WHERE username = ?",
         [username]
     )
+    if needs_password_rehash(stored_hash):
+        await turso_execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            [hash_password(req.password), username]
+        )
     
     token = generate_token()
     await save_token(token, username)
@@ -1229,8 +1354,8 @@ async def login(req: LoginRequest):
     return {
         "token": token,
         "username": username,
-        "api_key": api_key,
         "preferred_model": model,
+        "has_api_key": bool(api_key),
         "user_id": username + "_nora"
     }
 
@@ -1251,7 +1376,7 @@ async def get_me(request: Request):
     
     return {
         "username": username,
-        "api_key": rows[0][1].get("value", ""),
+        "has_api_key": bool(rows[0][1].get("value", "")),
         "preferred_model": rows[0][2].get("value", ""),
         "created_at": rows[0][3].get("value", ""),
         "user_id": username + "_nora"
@@ -1293,28 +1418,18 @@ async def update_user(request: Request, data: dict):
     
     return {"ok": True}
 
-# ── 開發者面板 API ──
-DEV_KEY_SUFFIX = os.environ.get("DEV_KEY_SUFFIX", "fbbe0d46")  # 你的 API Key 後8碼
-
 def check_dev_auth(request: Request) -> bool:
     """驗證開發者身份"""
     auth = request.headers.get("Authorization", "").replace("Bearer ", "")
-    if DEV_KEY_SUFFIX and auth.endswith(DEV_KEY_SUFFIX):
-        return True
-    # 也接受直接傳後8碼
-    if auth == DEV_KEY_SUFFIX:
-        return True
-    return False
+    return bool(DEV_ADMIN_TOKEN) and secrets.compare_digest(auth, DEV_ADMIN_TOKEN)
 
 @app.get("/dev/debug-auth")
 async def dev_debug_auth(request: Request):
-    auth = request.headers.get("Authorization", "")
-    suffix = DEV_KEY_SUFFIX
+    auth = request.headers.get("Authorization", "").replace("Bearer ", "")
     return {
-        "auth_received": auth,
-        "suffix_set": bool(suffix),
-        "suffix_preview": suffix[:3] + "..." if suffix else "空",
-        "match": auth.replace("Bearer ", "").endswith(suffix) if suffix else False
+        "auth_present": bool(auth),
+        "admin_token_set": bool(DEV_ADMIN_TOKEN),
+        "match": check_dev_auth(request)
     }
 
 @app.get("/dev/users")
@@ -1556,11 +1671,12 @@ async def test_token_save():
 @app.get("/my/status")
 async def my_status(request: Request):
     """用戶查詢自己的 Nora 狀態——只回傳自己的資料"""
-    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
-    if not api_key:
+    auth = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not auth:
         raise HTTPException(status_code=401, detail="需要 API Key")
     
-    user_id = api_key[-8:] + "_nora"
+    username = await get_user_by_token(auth)
+    user_id = (username + "_nora") if username else (auth[-8:] + "_nora")
     
     # 基本數值
     data = get_user_data(user_id)
@@ -1832,6 +1948,9 @@ async def openai_chat(request: Request):
         except Exception as e:
             print(f"Nora life error: {e}")
     
+        # 增加輪次計數
+        turn_count = increment_turn_count(user_id)
+
         # 取得世界編號和世界回響
         world_number = 1
         world_count = 0
@@ -1845,9 +1964,6 @@ async def openai_chat(request: Request):
                 asyncio.create_task(generate_world_echoes(api_key, model))
         except Exception as e:
             print(f"World system error: {e}")
-    
-        # 增加輪次計數
-        turn_count = increment_turn_count(user_id)
     
         # 計算實際對話歷史長度（偵測回朔）
         actual_msg_count = len([m for m in user_messages if m["role"] == "user"])
